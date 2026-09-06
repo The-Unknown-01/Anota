@@ -119,9 +119,7 @@ algorizm_fix（当前分支 ★HEAD）
 
 ## 5. ⚠️ 风险与待办（重要）
 
-1. **`src/core/ai/evidence-extractor.js` 尚未 `git add`**（未跟踪），但 `background.js` 已在引用它。**当前仓库 HEAD 不含此文件**——克隆到别处会因 importScripts 找不到文件而报错。**建议尽快提交**。
-2. 两份 spec 文档（`search_system_P0_P1_modification_spec.md`、`search_system_post_P0_P1_next_stage.md`）也未跟踪，建议一并纳入版本管理作为设计依据。
-3. 以上算法改动**尚未经过真实浏览器端到端回归**（各阶段只做了 Node 语法检查 + mock 单测），建议：加载扩展 → 分别跑"含数字声明求真 / 媒体→上游溯源 / as_of 声明"各一次。
+1. 以上算法改动**尚未经过真实浏览器端到端回归**（各阶段只做了 Node 语法检查 + mock 单测），建议：加载扩展 → 分别跑"含数字声明求真 / 媒体→上游溯源 / as_of 声明"各一次。
 
 ---
 

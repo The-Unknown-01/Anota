@@ -2,8 +2,11 @@
 
 > 项目：知乎黑客松 2026「求真 · 深读」Chrome Extension（MV3）。
 > 本文件是全部版本的**计划与交付总账**：每个版本一节（计划 → 决策点 → 执行记录），按时间正序排列。
-> 版本升级要求的原文见 `docs/` 下 `v1.5_UPGRADE.md` ~ `v2.7_UPGRADE.md`。
-> 回退锚点：git tag 与里程碑一一对应（m0~m4 / u0~u4 / v1.5 / v1.6 / v2.0 / v2.5 / v2.6 / v2.7）。
+> 版本升级要求的原文见 `docs/` 下 `v1.5_UPGRADE.md` ~ `v2.7_UPGRADE.md`；V2.9 依据
+> `docs/branch_evolution_guide.md` 与仓库根两份 spec（`search_system_P0_P1_modification_spec.md`、
+> `search_system_post_P0_P1_next_stage.md`）。
+> 回退锚点：git tag 与里程碑一一对应（m0~m4 / u0~u4 / v1.5 / v1.6 / v2.0 / v2.5 / v2.6 / v2.7 / v2.8）；
+> algorizm_fix 分支（V2.9）尚未打 tag（HEAD=32565e8）。
 
 ---
 
@@ -16,7 +19,8 @@
 - [V2.5 · 来源评价系统（计划 + 交付记录）](#v25--来源评价系统)
 - [V2.6 · 证据定向与溯源追踪（交付记录）](#v26--证据定向与溯源追踪)
 - [V2.7 · 安全代理（交付记录）](#v27--安全代理)
-- [V2.8 · 登录门禁（升级计划，待审批）](#v28--登录门禁邀请码--jwt)
+- [V2.8 · 登录门禁（升级计划 + 执行记录）](#v28--登录门禁邀请码--jwt)
+- [V2.9 · 检索算法闭环（algorizm_fix 分支）](#v29--检索算法闭环algorizm_fix-分支)
 - [已知环境问题](#已知环境问题)
 - [遗留事项](#遗留事项)
 
@@ -417,6 +421,96 @@ V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
 - 邀请码为 Secrets 逗号分隔表，兑换不销毁（自用规模可接受）；一次性兑换/别名注册需 KV 或 D1，列入 V3 备选
 - 限流计数器 SW 重启归零，非精确配额
 - 同秒重签的 JWT 字面相同（exp 秒级精度）——仅影响测试断言写法，不影响安全
+
+---
+
+# V2.9 · 检索算法闭环（algorizm_fix 分支）
+
+> 依据：`docs/branch_evolution_guide.md`（2026-09-02）+ 仓库根两份 spec
+> （`search_system_P0_P1_modification_spec.md`、`search_system_post_P0_P1_next_stage.md`）。
+> 分支关系：master（≤V2.6）→ feature-cfworker（V2.7+V2.8）→ **algorizm_fix（本分支 ★HEAD）**。
+> 定位：检索/验证系统从「找相关网页」升级为「**先定证据目标 → 兼容门控 → 溯源 → 证据抽取 → 绑定**」的闭环；
+> 原则不变——LLM 负责理解，确定性引擎负责决策约束、排序、去重与证据绑定。
+> 规模：11 个源码文件 +634/−82（含新文件 evidence-extractor.js），6 个提交，**未打 tag、未浏览器回归**。
+
+## V2.9 交付内容（P0–P7 全部落地，提交 f7c5732 → 32565e8）
+
+### P0 组 · 决策权理顺（f7c5732 / 70769c5）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 官方/高校域名后缀规则补全 | `source-registry.js` | `gov.uk`、`ac.uk`、`go.jp`、任意 `.int` 国际组织等均按后缀识别可信来源（不再逐国枚举） |
+| Evidence Target 成为唯一「找什么证据」决策源 | `v25-pipeline.js` | 消除 Query Analyzer 与 Evidence Target 双决策源冲突；检索与排序统一听 ET |
+| Target Compatibility 门控（**eventFit**） | `scoring-engine.js` | 打分前先判「是否真的在谈目标事件」：主体对但事件错（大足区纠纷 vs 招聘通报）→ 打折沉底；不硬删除（宁漏判不错杀）；补上八维缺的 event fit |
+| 时间语义 `temporalMode` | `query-analyzer.js` | claim 分历史事实/当前状态/近期/动态变化/截至某时/永恒成立六类；`temporalMatchScore` 据此打分（「深圳 2006 年校服政策」不当旧资料惩罚） |
+| buildPlan 听 ET 检索策略 | `v25-pipeline.js` | 精确找原文→收敛搜索压社区噪声；广泛印证→放开知乎；溯源→加媒体召回 |
+
+### Phase 1 · URL 可访问性（47aeb36）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| Web Reader 返回访问元数据 | `web-reader.js` | `finalUrl`（跳转）/`canonicalUrl`/`accessStatus`（404、登录墙、JS 渲染、超时细分） |
+| 打不开 ≠ 没证据 | `verify-engine.js` | 404 后先试 canonical，再用「标题+发布者」重搜可访问版本；都失败才降级 |
+| 访问失败不降权威分 | `verify-engine.js` | 权威分在读取前已算好；打不开只影响该证据能否用 |
+
+### Phase 2 · Evidence Extraction（47aeb36 / 0d7117e）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 数值结构化抽取 | `evidence-extractor.js` ★新 | 判定前正则抽取 `35%`/`3.5万亿`/`37人`/`2026年`（带单位+涨跌方向），格式化注入判定 prompt——解决「AI 读到了整段话却说没看到数字」 |
+| 判定引擎读数值 | `verify-engine.js` | 每来源判定可见「本页检测到的数值」清单，数值挂到证据供最终绑定 |
+
+### Phase 3 · 递归溯源（0d7117e）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| Provenance 从一跳变递归 | `provenance.js` | 媒体 A → 路透社 → 警方 → 警方官网 → 追到源头为止 |
+| 受控停止 | `provenance.js` | 深度 ≤3、同 URL 不再追（防环）、命中政府/论文域名即停、预算封顶 |
+| 官方域定向检索 | `provenance.js` | 线索「国家统计局」→ 带 `site:stats.gov.cn` 搜上游 |
+
+### Phase 4 · 来源身份三层（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| platform / publisher / claimedOrigin | `source-analyzer.js` | 区分「托管平台」（公众号/微博/头条）≠「发布账号」≠「内容原产者」（正文自称据央视/路透社）——第三方平台转载央视 ≠ 央视原发 |
+| 身份置信度 | `source-analyzer.js` | 官方域名=HIGH、仅名称一致=MEDIUM、第三方转载无法确认=LOW |
+
+### Phase 5 · 当前页进证据图（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 当前页元数据抽取 | `evidence-extractor.js` | 从 `<meta>`/JSON-LD 抽发布者、发布时间、作者 |
+| 当前页作为候选 | `v25-pipeline.js` | 正在读的文章也进候选池参与打分/验证——能回答「我正看的这篇是不是最新的/转载的」；权威仍按正常规则判定 |
+
+### Phase 6+7 · 动态事实与数字绑定（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 「截至」参考时间 | `query-analyzer.js` | 「截至2026年8月30日，死亡21人」→ 自动记 `截至 2026年8月30日` |
+| 成稿时间限定 | `analyzer.js` | 动态数据结论要求 LLM 用「截至[来源发布时间/检索时间]」表述，不许输出无时间限定的绝对断言 |
+| 结论数字 ↔ 证据数字绑定 | `analyzer.js` | 结论说「涨了35%」但证据原文找不到 35% → 自动保守处理（supported 降级 partial + 加注） |
+
+## 文件级改动（vs feature-cfworker）
+
+```text
+ analyzer.js           +52   （Phase 6 时间限定 + Phase 7 数字绑定）
+ provenance.js         +131  （Phase 3 递归溯源）
+ query-analyzer.js     +30   （temporalMode + referenceTime）
+ scoring-engine.js     +75   （Target Compatibility 门控 + eventFit）
+ source-analyzer.js    +32   （Phase 4 身份三层）
+ source-registry.js    +9    （国别政府/高校/国际组织后缀）
+ v25-pipeline.js       +51   （ET 单一决策源 + buildPlan 接线 + 当前页候选）
+ verify-engine.js      +153  （URL 失效恢复 + 访问状态 + 数值注入判定）
+ web-reader.js         +62   （Phase 1 访问元数据）
+ evidence-extractor.js +119  ★新文件（Phase 2/5 数值+页面元数据抽取）
+ background.js          2 行 （importScripts 注册 evidence-extractor）
+```
+
+## 验证与状态
+
+- 各阶段仅做 Node 语法检查 + mock 单测；**尚未真实浏览器端到端回归**（guide §5）
+- 待办：加载扩展 → 分别跑「含数字声明求真 / 媒体→上游溯源 / as_of 声明」各一次
+- 分支未打 tag（HEAD=32565e8）；工作区另有整理：`.env/` 入 gitignore（含 metaso_endpoint.txt 移入）、guide 移入 docs/
 
 ---
 
