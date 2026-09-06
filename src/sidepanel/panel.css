@@ -433,3 +433,87 @@ li.cand.lit .cand-type { background: rgba(46,158,91,.16); color: var(--ok, #2e9e
   text-align: center; font-size: 10.5px; color: var(--ink-3); padding: 2px 0 6px;
 }
 .cache-flag { color: var(--accent); margin-right: 6px; }
+
+/* ---- V3.0 M1：证据网络图 ---- */
+.net-wrap { display: flex; flex-direction: column; }
+.net-conclusion {
+  padding: 10px 12px; border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(255,196,86,.10), rgba(255,255,255,.02));
+  border: 1px solid rgba(255,196,86,.22);
+}
+.net-conclusion .badge { margin-bottom: 4px; }
+.net-conclusion-text { font-size: 12.5px; color: var(--ink-1); line-height: 1.55; }
+.net-edge {
+  height: 14px; margin-left: 14px; border-left: 2px dashed rgba(127,127,160,.35);
+  animation: edge-grow .4s ease;
+}
+@keyframes edge-grow { from { height: 0; opacity: 0; } to { height: 14px; opacity: 1; } }
+.net-nums { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 7px; }
+.net-nums-label { font-size: 10.5px; color: var(--ink-3); margin-right: 2px; }
+.num-chip {
+  font-size: 10.5px; padding: 1px 8px; border-radius: var(--radius-full);
+  font-variant-numeric: tabular-nums;
+}
+.num-chip.ok { background: rgba(46,158,91,.14); color: var(--ok, #2e9e5b); }
+.num-chip.miss { background: rgba(214,69,69,.13); color: #d64545; }
+
+.net-groups { display: flex; gap: 8px; margin-top: 4px; }
+/* 窄栏自动纵向（sidepanel 常窄 → 纵向为默认；宽视口才并排） */
+.net-groups { flex-direction: column; }
+@media (min-width: 640px) { .net-groups { flex-direction: row; align-items: stretch; } }
+.net-group {
+  flex: 1 1 0; min-width: 0;
+  border-radius: var(--radius-lg); padding: 8px 9px;
+  background: rgba(127,127,160,.05);
+  border: 1px solid var(--glass-border);
+}
+.net-group.support { border-left: 3px solid var(--ok, #2e9e5b); }
+.net-group.contradict { border-left: 3px solid #d64545; }
+.net-group.unknown { border-left: 3px solid rgba(127,127,160,.5); }
+.net-group-head { font-size: 11px; color: var(--ink-3); margin-bottom: 6px; letter-spacing: .03em; }
+.net-node {
+  border-radius: var(--radius-md); padding: 6px 8px; margin-bottom: 6px;
+  background: var(--glass-bg); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: transform var(--fluid);
+}
+.net-node:hover { transform: translateX(2px); }
+.net-group.support .net-node { border-left: 2px solid rgba(46,158,91,.55); }
+.net-group.contradict .net-node { border-left: 2px solid rgba(214,69,69,.6); }
+.net-group.unknown .net-node { border-left: 2px solid rgba(127,127,160,.3); }
+.net-node-head { display: flex; align-items: center; gap: 6px; }
+.net-node-verdict {
+  flex: 0 0 auto; font-size: 10px; font-weight: 700;
+  padding: 1px 7px; border-radius: var(--radius-full);
+}
+.net-group.support .net-node-verdict { background: rgba(46,158,91,.15); color: var(--ok, #2e9e5b); }
+.net-group.contradict .net-node-verdict { background: rgba(214,69,69,.15); color: #d64545; }
+.net-group.unknown .net-node-verdict { background: rgba(127,127,160,.16); color: var(--ink-3); }
+.net-node-title {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 600; color: var(--ink-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+a.net-node-title:hover { color: var(--accent); }
+.net-node-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 2px; }
+.net-node-tags .src-badge, .net-node-tags .src-original, .net-node-tags .src-synd { font-size: 10px; padding: 0 5px; }
+.net-verified { color: var(--ok, #2e9e5b); }
+.net-node-score { font-size: 10px; color: var(--ink-3); margin-left: auto; }
+.net-node-note { font-size: 10.5px; color: #b8860b; margin-top: 2px; }
+.net-node-quote {
+  font-size: 11px; color: var(--ink-2); line-height: 1.45; margin-top: 3px;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.net-node-matched { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+
+/* 溯源链 */
+.net-trace { margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(127,127,160,.18); }
+.net-trace-title { font-size: 11px; color: var(--ink-3); margin-bottom: 5px; letter-spacing: .03em; }
+.net-trace-line { display: flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 2px 0; flex-wrap: wrap; }
+a.net-trace-from, a.net-trace-hit { color: var(--ink-1); text-decoration: none; }
+a.net-trace-from:hover, a.net-trace-hit:hover { color: var(--accent); }
+.net-trace-from { font-weight: 600; }
+.net-trace-hit { color: var(--ok, #2e9e5b); }
+.net-trace-arrow { color: var(--ink-3); }
+.net-trace-depth, .net-trace-kind {
+  font-size: 10px; color: var(--ink-3);
+  background: rgba(127,127,160,.1); padding: 0 6px; border-radius: var(--radius-full);
+}

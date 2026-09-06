@@ -432,6 +432,114 @@
 
   function esc(s) { return String(s == null ? '' : s); }
 
+  // ---------- V3.0 M1：证据网络图渲染 ----------
+  var NET_GROUP_META = {
+    support:    { cls: 'support', zh: '支持结论' },
+    contradict: { cls: 'contradict', zh: '矛盾证据' },
+    unknown:    { cls: 'unknown', zh: '未判定' }
+  };
+  var NET_SOURCE_TYPE_ZH = { gov: '官方', media: '媒体', academic: '学术', org: '机构', zhihu: '知乎', community: '社区', corporate: '企业', paper: '论文', other: '网页' };
+
+  // 渲染证据网络卡（模型由 evidence-network.js 构造；纯展示）
+  function renderNetworkCard(verification, result) {
+    var NET = global.WCC_EVIDENCE_NETWORK;
+    if (!NET || !NET.buildEvidenceNetwork) return null;
+    var model = NET.buildEvidenceNetwork(verification, result);
+    var totalNodes = model.groups.support.length + model.groups.contradict.length + model.groups.unknown.length;
+    if (!totalNodes) return null;
+
+    var card = cardWith('证据网络');
+    var wrapper = el('div', 'net-wrap');
+    // —— 结论节点 ——
+    var concl = el('div', 'net-conclusion');
+    concl.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
+    concl.appendChild(el('div', 'net-conclusion-text', esc(model.summary || result.summary || '')));
+    // 数字绑定总览：结论声称的数字 vs 支持证据中实际找到的
+    if (model.claimedTokens.length) {
+      var numRow = el('div', 'net-nums');
+      numRow.appendChild(el('span', 'net-nums-label', '数字核对'));
+      model.claimedTokens.forEach(function (tok) {
+        var found = model.groups.support.some(function (n) { return n.matched.indexOf(tok) >= 0; });
+        var chip = el('span', 'num-chip ' + (found ? 'ok' : 'miss'), (found ? '✓ ' : '✗ ') + tok);
+        chip.title = found ? '在支持证据中找到 ' + tok : '支持证据中未找到 ' + tok + '（结论已自动保守处理）';
+        numRow.appendChild(chip);
+      });
+      concl.appendChild(numRow);
+    }
+    wrapper.appendChild(concl);
+    // 连接线（结论 ↓ 证据）
+    wrapper.appendChild(el('div', 'net-edge'));
+
+    // —— 证据节点分组：支持左/绿、矛盾右/红（并排对照）；窄栏自动纵向 ——
+    var groupsRow = el('div', 'net-groups');
+    model.groupOrder.forEach(function (g) {
+      var nodes = model.groups[g];
+      if (!nodes.length) return;
+      var meta = NET_GROUP_META[g];
+      var col = el('div', 'net-group ' + meta.cls);
+      var head = el('div', 'net-group-head');
+      head.appendChild(el('span', 'net-group-count', meta.zh + ' · ' + nodes.length));
+      col.appendChild(head);
+      nodes.slice(0, 4).forEach(function (n) { col.appendChild(buildNetNode(n, g)); });
+      groupsRow.appendChild(col);
+    });
+    wrapper.appendChild(groupsRow);
+
+    // —— 溯源链（递归溯源到源头：媒体 → 官方） ——
+    var prov = model.provenance;
+    if (prov && prov.upstreamHits && prov.upstreamHits.length) {
+      var traceCard = el('div', 'net-trace');
+      traceCard.appendChild(el('div', 'net-trace-title', '溯源链（追到源头）'));
+      prov.upstreamHits.slice(0, 5).forEach(function (h) {
+        if (!h || !h.from) return;
+        var line = el('div', 'net-trace-line');
+        line.appendChild(el('a', 'net-trace-from', esc(shortHost(h.from))));
+        line.href = h.from; line.target = '_blank'; line.rel = 'noopener';
+        line.appendChild(el('span', 'net-trace-arrow', '→'));
+        var hitA = el('a', 'net-trace-hit', esc((h.hit && (h.hit.title || shortHost(h.hit.url))) || '源头'));
+        hitA.href = (h.hit && h.hit.url) || h.from; hitA.target = '_blank'; hitA.rel = 'noopener';
+        line.appendChild(hitA);
+        if (h.depth != null) line.appendChild(el('span', 'net-trace-depth', '第 ' + h.depth + ' 跳'));
+        if (h.kind) line.appendChild(el('span', 'net-trace-kind', h.kind === 'explicit_link' ? '原文引用' : '检索'));
+        traceCard.appendChild(line);
+      });
+      wrapper.appendChild(traceCard);
+    }
+
+    card.appendChild(wrapper);
+    return card;
+  }
+
+  function shortHost(u) {
+    try { var h = new URL(u).hostname; return h.replace(/^www\./, ''); } catch (e) { return String(u || '').slice(0, 40); }
+  }
+
+  function buildNetNode(n, group) {
+    var node = el('div', 'net-node ' + NET_GROUP_META[group].cls);
+    var head = el('div', 'net-node-head');
+    head.appendChild(el('span', 'net-node-verdict', n.judgmentZh || ''));
+    var titleA = el('a', 'net-node-title', esc(n.title));
+    titleA.href = n.url; titleA.target = '_blank'; titleA.rel = 'noopener';
+    head.appendChild(titleA);
+    node.appendChild(head);
+    var tags = el('div', 'net-node-tags');
+    tags.appendChild(el('span', 'src-badge', NET_SOURCE_TYPE_ZH[n.sourceType] || '网页'));
+    if (n.registryVerified) tags.appendChild(el('span', 'src-badge net-verified', '✓可信域'));
+    if (n.originality === '一手') tags.appendChild(el('span', 'src-original', '一手'));
+    else if (n.originality === '疑似转载') tags.appendChild(el('span', 'src-synd', '疑似转载'));
+    if (n.scoreTotal != null) tags.appendChild(el('span', 'net-node-score', '分 ' + n.scoreTotal));
+    node.appendChild(tags);
+    if (n.readError) node.appendChild(el('div', 'net-node-note', n.readError === 'not_read' ? '原文不可读' : '读取失败'));
+    else if (n.recovered) node.appendChild(el('div', 'net-node-note', '已恢复可访问版本'));
+    if (n.quote) node.appendChild(el('div', 'net-node-quote', '「' + esc(n.quote) + '」'));
+    if (n.matched && n.matched.length) {
+      var mRow = el('div', 'net-node-matched');
+      n.matched.forEach(function (tok) { mRow.appendChild(el('span', 'num-chip ok', '✓ ' + tok)); });
+      node.appendChild(mRow);
+    }
+    return node;
+  }
+
   function renderTruth(result, entry) {
     var pane = els.panes.truth;
     pane.innerHTML = '';
@@ -465,6 +573,12 @@
       c1.appendChild(metaLine);
     }
     pane.appendChild(c1);
+
+    // V3.0 M1：证据网络图（结论 → 支持/矛盾证据分组 + 数字绑定 + 溯源链；v3.0_UPGRADE §3.3）
+    if (entry && entry.verification && Array.isArray(entry.verification.evidences)) {
+      var netCard = renderNetworkCard(entry.verification, result);
+      if (netCard) pane.appendChild(netCard);
+    }
 
     // V2.5 溯源来源（verifyClaimV25 候选列表：已排序、带六维评分与 whyText）
     var v25Candidates = entry && entry.verification && entry.verification.candidates;
