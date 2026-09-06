@@ -441,8 +441,9 @@
   var NET_SOURCE_TYPE_ZH = { gov: '官方', media: '媒体', academic: '学术', org: '机构', zhihu: '知乎', community: '社区', corporate: '企业', paper: '论文', other: '网页' };
 
   // 渲染证据网络卡（模型由 evidence-network.js 构造；纯展示）
+  // 注意：panel.js 是无参 IIFE，无 global 变量——必须用 globalThis 访问共享模块
   function renderNetworkCard(verification, result) {
-    var NET = global.WCC_EVIDENCE_NETWORK;
+    var NET = (typeof globalThis !== 'undefined') ? globalThis.WCC_EVIDENCE_NETWORK : null;
     if (!NET || !NET.buildEvidenceNetwork) return null;
     var model = NET.buildEvidenceNetwork(verification, result);
     var totalNodes = model.groups.support.length + model.groups.contradict.length + model.groups.unknown.length;
