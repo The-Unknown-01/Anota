@@ -73,6 +73,46 @@
   var theater = {};
   var ENGINES_ZH = { exa: 'Exa', metaso: 'metaso', zhihu: '知乎', explicit: '原文', current_page: '当前页' };
 
+  // ---------- V3.0 M0b：渐进式产出（候选来源先上屏、逐条点亮） ----------
+  var previewBox = document.getElementById('candidate-preview');
+  var candidateList = document.getElementById('candidate-list');
+  var SOURCE_TYPE_ZH = { gov: '官方', media: '媒体', academic: '学术', org: '机构', industry: '行业', community: '社区', corporate: '企业', paper: '论文', other: '其他' };
+
+  // 用 title/url 去重：同一来源可能先出现在 search preview 再出现在 sortedPreview
+  var previewSeen = {};
+
+  function resetPreview() {
+    if (!candidateList) return;
+    candidateList.innerHTML = '';
+    previewSeen = {};
+    if (previewBox) previewBox.hidden = true;
+  }
+
+  // items: [{title,url,sourceType?,originality?,engine}]；mode: 'raw'（灰占位）/ 'sorted'（点亮+徽章）
+  function appendPreview(items, mode) {
+    if (!candidateList || !items || !items.length) return;
+    if (previewBox) previewBox.hidden = false;
+    items.forEach(function (it) {
+      if (!it || !it.title) return;
+      var key = it.url || it.title;
+      if (previewSeen[key]) return; // 已在列表（去重）
+      previewSeen[key] = true;
+      var li = document.createElement('li');
+      li.className = 'cand ' + (mode === 'sorted' ? 'lit' : 'dim');
+      var type = document.createElement('span');
+      type.className = 'cand-type';
+      type.textContent = mode === 'sorted' ? (SOURCE_TYPE_ZH[it.sourceType] || '其他') : (ENGINES_ZH[it.engine] || '');
+      var title = document.createElement('span');
+      title.className = 'cand-title';
+      title.textContent = it.title;
+      var meta = document.createElement('span');
+      meta.className = 'cand-meta';
+      meta.textContent = mode === 'sorted' ? (it.originality || '') : '';
+      li.appendChild(type); li.appendChild(title); li.appendChild(meta);
+      candidateList.appendChild(li);
+    });
+  }
+
   function stageSubText(phase, detail) {
     // 生成阶段完成摘要（V1：完成阶段收起为一行摘要；进行中阶段展开 hint）
     if (!detail) return null;
@@ -107,6 +147,7 @@
     if (!els.loadingSteps) return;
     els.loadingSteps.innerHTML = '';
     theater = {};
+    resetPreview(); // V3.0 M0b：候选区随剧场重建
     TRUTH_STAGES.forEach(function (s, i) {
       var li = document.createElement('li');
       li.className = 'stage' + (i === 0 ? ' doing' : ''); // V1：第一行乐观展开（真实事件到达后接管）
@@ -148,6 +189,12 @@
       t.row.classList.add('done');
       var sub = stageSubText(st.phase, st.detail) || ((TRUTH_STAGES.filter(function (s) { return s.id === st.phase; })[0] || {}).hint || '完成');
       t.sub.textContent = sub;
+      // V3.0 M0b：渐进式产出——search done 上屏候选占位；filter done 升级点亮带徽章
+      if (st.phase === 'search' && st.detail && st.detail.preview) {
+        appendPreview(st.detail.preview, 'raw');
+      } else if (st.phase === 'filter' && st.detail && st.detail.sortedPreview) {
+        appendPreview(st.detail.sortedPreview, 'sorted');
+      }
     } else if (st.status === 'error') {
       t.row.classList.add('error');
       t.sub.textContent = stageSubText(st.phase, st.detail) || '此步未成功';

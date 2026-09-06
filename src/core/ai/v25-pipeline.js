@@ -204,7 +204,15 @@
           STAGE.done('search', {
             enginesUsed: acc.enginesUsed,
             rawCount: acc.merged.length,
-            queryLog: acc.queryLog
+            queryLog: acc.queryLog,
+            // V3.0 M0b：候选预览（去重前原始结果，供 UI 渐进式点亮；最多 6 条）
+            preview: acc.merged.slice(0, 6).map(function (it) {
+              return {
+                title: String(it.title || it.url || '').slice(0, 80),
+                url: String(it.url || ''),
+                engine: it.engine || 'unknown'
+              };
+            })
           });
           return acc;
         }
@@ -312,7 +320,18 @@
               var by = {};
               ranked.ranked.forEach(function (c) { by[c.engine] = (by[c.engine] || 0) + 1; });
               return by;
-            })()
+            })(),
+            // V3.0 M0b：排序后候选（供 UI 渐进式点亮，带类型/一手性徽章；最多 6 条）
+            sortedPreview: ranked.ranked.slice(0, 6).map(function (c) {
+              var a = c.sourceAnalysis || {};
+              return {
+                title: String(c.title || c.url || '').slice(0, 80),
+                url: String(c.url || ''),
+                sourceType: a.sourceType || 'other',
+                originality: a.originality === 'original' ? '一手' : (c.suspectedSyndication ? '疑似转载' : '二手'),
+                engine: c.engine || 'unknown'
+              };
+            })
           });
 
           // ⑧ Provenance Tracing（upgrade.md §17~§24，预算受控；失败不阻断主流程）

@@ -70,10 +70,14 @@
       </button>
     </nav>
 
-    <!-- Loading 分步提示（PRD 05-UI-UX §18） -->
+    <!-- Loading 分步提示（PRD 05-UI-UX §18；V3.0：求真=直播剧场 + 候选渐进点亮） -->
     <section id="loading-state" class="state-card glass" hidden>
       <div id="loading-title" class="loading-title">正在分析……</div>
       <ul id="loading-steps" class="loading-steps"></ul>
+      <div id="candidate-preview" class="candidate-preview" hidden>
+        <div class="candidate-preview-title">已找到的来源</div>
+        <ul id="candidate-list" class="candidate-list"></ul>
+      </div>
     </section>
 
     <!-- Error 状态（PRD 05-UI-UX §19）：可重试，不空白 -->

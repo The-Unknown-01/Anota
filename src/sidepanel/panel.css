@@ -179,6 +179,27 @@ main { padding: 10px 12px 18px; }
   max-height: 4.6em; opacity: 1;
 }
 
+/* ---- V3.0 渐进式产出（候选先上屏、逐条点亮） ---- */
+.candidate-preview { margin-top: 10px; border-top: 1px dashed rgba(127,127,160,.18); padding-top: 8px; }
+.candidate-preview-title { font-size: 11px; color: var(--ink-3); margin-bottom: 4px; letter-spacing: .03em; }
+.candidate-list { list-style: none; margin: 0; padding: 0; }
+.candidate-list li.cand {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 12px; padding: 3px 0; line-height: 1.4;
+  opacity: 0; transform: translateY(4px);
+  animation: cand-in .3s ease forwards;
+}
+@keyframes cand-in { to { opacity: 1; transform: none; } }
+li.cand.dim .cand-title { color: var(--ink-3); }
+li.cand.lit .cand-title { color: var(--ink-1); }
+.cand-type {
+  flex: 0 0 auto; font-size: 10px; padding: 0 6px; border-radius: var(--radius-full);
+  background: rgba(127,127,160,.14); color: var(--ink-2);
+}
+li.cand.lit .cand-type { background: rgba(46,158,91,.16); color: var(--ok, #2e9e5b); }
+.cand-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cand-meta { flex: 0 0 auto; font-size: 10px; color: var(--ink-3); }
+
 .error-icon { font-size: 26px; color: var(--bad); }
 .error-title { font-weight: 700; margin: 6px 0 2px; }
 .error-detail { font-size: 12.5px; color: var(--ink-2); margin-bottom: 12px; }
