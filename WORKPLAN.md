@@ -562,6 +562,7 @@ V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
 |---|---|---|---|
 | M0a 阶段直播 | `a34e2e2`（+tag `v3.0-m0`） | v25-pipeline 6 主阶段事件（understand→bind，start/done/error）+ search 引擎级子事件；analyzer 透传 onStage；background ANALYZE_STAGE 广播（requestId）；panel 直播剧场（呼吸光点+展开细节，V1 决策） | hermes-verify-v30m0 12/12 + v30m0chain 6/6 + smoke 45/45 |
 | M0b 渐进产出 | `9b48771` | search done 携带 preview（原始候选≤6）；filter done 携带 sortedPreview（类型/一手性徽章）；panel「已找到的来源」候选先上屏 → 逐条点亮（url 去重） | hermes-verify-v30m0b 7/7 + v30m0 回归 + smoke 45/45 |
+| M0c filter 子流水线 | `8cf4562` | filter 拆 7 子步骤事件（dedupe/page_candidate/registry/source_analysis/academic/clusters/score，逐级真实聚合数据）；panel filter 行内纵向子流水线（序号节点+数值行默认展开，连接线图形化数据流） | hermes-verify-v30filterflow 11/11 + v30m0/v30m0b 回归 + smoke 45/45 |
 | M1 | 待执行 | 证据网络图 | — |
 | M2 | 待执行 | 动效细化 + 超时干预 + 求深求异适配 | — |
 
