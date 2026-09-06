@@ -4,8 +4,10 @@
 
 > 在你正在阅读的任何网页上，从一句话出发——**验证它、理解它，并发现你可能遗漏的观点。**
 >
-> **V2.8（登录门禁）**：**V2.7** 起密钥只存于云端（Cloudflare Worker 透明代理），扩展分发包零密钥、可安全分发；
-> **V2.8** 以「邀请码 + 短期 JWT」替代静态令牌——受邀用户自助开通，JWT 可过期/刷新/撤销，未登录不致全盲（可回退直连模式）。
+> **V2.9（检索算法闭环）**：检索/验证系统从「找相关网页」升级为证据闭环——
+> 先定证据目标、兼容门控、递归溯源到源头、数值结构化抽取、结论数字与证据绑定；
+> **V2.7** 起密钥只存于云端（Cloudflare Worker 透明代理），扩展分发包零密钥、可安全分发；
+> **V2.8** 以「邀请码 + 短期 JWT」替代静态令牌——受邀用户自助开通，JWT 可过期/刷新/撤销。
 
 ```text
 阅读网页 → 选中一句话 → 点击「深读」→ Side Panel 打开
@@ -55,31 +57,40 @@
 - 点击任意声明 → 进入该声明的三 Tab 深读；「← 本文概览」返回
 - 概览项点击同时**回定位网页**：滚动到该声明句并高亮闪烁
 
-### 4. 信息溯源管线 V2.6（求真）
+### 4. 信息溯源管线 V2.9（求真）
 
 ```text
 Claim + Context
-  ├─ 并行：Query Analyzer（策略） / Evidence Target（找什么） / 页面抓取（文章页超链接）
+  ├─ 并行：Query Analyzer（策略） / Evidence Target（找什么·唯一决策源） / 页面抓取（文章页超链接）
   │    Evidence Targeting：显式来源提取（URL/DOI/arXiv/PMID）→ Claim 11 类
   │    → Evidence Target 9 类 → Search Strategy 6 类 → Entity 解析（歧义不强行绑定）
-  ↓ buildPlan              双核普遍召回：Exa + Metaso 各问题类型都有预算（硬路由已取消）
-  │    显式来源步最优先（页面给的 DOI/论文链接直读原文）→ 双核步 → 官方域定向步
-  ↓ 检索 → URL 去重 → Registry 先验 → Source Analysis（按发布主体判身份，14 类）
+  │    temporalMode：历史事实/当前状态/近期/动态变化/截至某时/永恒成立 → 时间匹配打分
+  ↓ buildPlan（听 Evidence Target）  双核普遍召回（Exa + Metaso，硬路由已取消）
+  │    显式来源步最优先 → 双核步 → 官方域定向步；精确找原文收敛、广泛印证放开、溯源加媒体
+  ↓ 检索 → URL 去重 → Registry 先验（gov.uk/ac.uk/go.jp/.int 后缀规则）→ Source Analysis
+  │    身份三层：platform（托管平台）≠ publisher（发布账号）≠ claimedOrigin（自称原产者）
   ↓ Academic Exact-Source  DOI/arXiv/PMID/显式URL 直中 → TARGET_PAPER；语义相似只是 RELATED_PAPER
   ↓ Evidence Clusters      转载三级分级（duplicate/likely/possible）→ 同簇不冒充独立证据
-  ↓ Scoring Engine         八维评分：authority/relevance/directness/entity/scope/temporal/
-  │                        originality/evidence + 目标论文加分 + 转载惩罚
-  ↓ Provenance Tracing     「据X报道/转载自」上游线索提取 → 共同上游检测（预算受控）
+  ↓ Scoring Engine         八维 + Target Compatibility 门控（eventFit：主体对事件错 → 打折沉底）
+  │                        八维：authority/relevance/directness/entity/scope/temporal/
+  │                              originality/evidence + 目标论文加分 + 转载惩罚
+  ↓ Provenance 递归溯源    媒体 A → 路透社 → 警方 → 官网（深度≤3、防环、命中官方即停、预算封顶）
+  │                        当前页自身也进候选池参与打分/验证
   ↓ 验证池 Top-6           类型多样性 + 同溯源簇只留 1 个代表
-  ↓ Web Reader + Verify    逐源判定 存在≠相关≠支持 → 五态结论 + 逐字引用（带 E 编号）
-  ↓ Binding + Hard Check   6 项硬校验：无来源降级 insufficient、未绑定编号降级 partial、
-                           歧义主体保守提示 → 输出 evidenceTarget/binding/provenance/stats
+  ↓ Web Reader（访问元数据：finalUrl/canonicalUrl/404/登录墙/JS渲染/超时）
+  │    → Evidence Extraction：正则抽取 35%/3.5万亿/37人/2026年（带单位+涨跌方向）
+  ↓ Verify                 逐源判定 存在≠相关≠支持；404 后试 canonical/重搜可访问版本；
+  │                        打不开不降权威分 → 五态结论 + 逐字引用（带 E 编号）
+  ↓ Binding + Hard Check   6 项硬校验 + 结论数字↔证据数字绑定（结论说 35% 但证据无 → supported 降 partial）
+  │                        动态数据结论强制「截至[来源时间/检索时间]」表述
+  → 输出 evidenceTarget/binding/provenance/stats
 ```
 
-- **证据定向**：搜索前先回答"找什么"——显式来源（文章里给的 DOI/论文链接）永远最先直读，而不是重新语义搜索
+- **证据定向**：搜索前先回答"找什么"——Evidence Target 是唯一决策源；显式来源（文章里给的 DOI/论文链接）永远最先直读
+- **兼容门控**：打分前先判来源是否真的在谈目标事件——主体对但事件错 → 打折沉底，不硬删除（宁漏判不错杀）
+- **时间语义**：「截至2026年8月30日，死亡21人」自动记参考时间；历史政策不当旧资料惩罚，动态数据结论必须带时间限定
 - **权威 ≠ 一手 ≠ 直接回答**：八维独立计分——高权威媒体转载、答非所问的官方页、错年份的报告都会被对应维度拉低
-- **地域与时间**：全国人口不会被县级报告顶替（scope 重罚），2023 报告不会顶替 2025 数据（temporal）
-- **发布主体身份**：按"谁发布的"判来源类型（公众号里的学会是 org 不是 government）
+- **打不开 ≠ 没证据**：404 后试 canonical、再「标题+发布者」重搜；访问失败不影响权威分（权威分读取前已算好）
 - **诚实展示**：来源卡显示类型徽章、一手性、目标论文/相关论文、共享上游标记、whyText；绑定状态与硬校验结果在元信息行明示
 
 ## 隐私
@@ -123,16 +134,18 @@ project_hackathon/
 │   ├── content-script/      # 页面注入：extractor(结构化提取) / orb(悬浮球) / hover(打标+提示卡) / content(选区+深读按钮)
 │   ├── background/          # Service Worker：消息路由、Active Selection 持久化、Side Panel 控制、AUTH 消息
 │   ├── auth/                # ★V2.8 登录门禁：invite-jwt.js（邀请码兑换/JWT 存取/静默刷新）
-│   ├── ai/                  # 分析链路：
-│   │                        #   analyzer(三模式+证据绑定硬校验) / claim-detector(v2 对象识别)
-│   │                        #   evidence-target(搜索前决策:显式来源/Claim分类/目标/策略) ★V2.6
+|   ├── ai/                  # 分析链路：
+│   │                        #   analyzer(三模式+证据绑定+数字绑定) / claim-detector(v2 对象识别)
+│   │                        #   evidence-target(唯一「找什么证据」决策源) ★V2.6
+│   │                        #   evidence-extractor(正则数值/页面元数据抽取) ★V2.9
 │   │                        #   academic(论文精确验证:DOI/arXiv/PMID/显式URL) ★V2.6
-│   │                        #   provenance(上游线索提取/共同上游检测/受控溯源) ★V2.6
-│   │                        #   query-analyzer(策略+实体官方域+跨语言Query) / url-utils(URL规范化去重)
-│   │                        #   source-registry(三层可信先验) / source-analyzer(发布主体身份14类)
-│   │                        #   evidence-graph(转载三级分级聚簇) / scoring-engine(八维评分)
-│   │                        #   v25-pipeline(溯源编排) / web-reader(原文抽取+超链接提取)
-│   │                        #   verify-engine(五态验证+多样性验证池+求异)
+│   │                        #   provenance(递归溯源到源头/官方域定向) ★V2.6/V2.9
+│   │                        #   query-analyzer(策略+temporalMode+跨语言Query) / url-utils(URL规范化去重)
+│   │                        #   source-registry(可信先验+gov.uk/ac.uk/.int 后缀) ★V2.9
+│   │                        #   source-analyzer(platform/publisher/claimedOrigin 身份三层) ★V2.9
+│   │                        #   evidence-graph(转载三级分级聚簇) / scoring-engine(八维+eventFit 门控) ★V2.9
+│   │                        #   v25-pipeline(溯源编排+当前页候选) / web-reader(访问元数据+超链接) ★V2.9
+│   │                        #   verify-engine(五态验证+URL 失效恢复+数值注入判定) ★V2.9
 │   │                        #   search-controller(V2.0选源,兼容路径) / datasource(多引擎可插拔)
 │   └── utils/               # 消息类型常量
 ├── src/sidepanel/           # 深读工作台（三 Tab + 本文概览态 + V2.6 绑定/溯源展示 + V2.8 登录区）
@@ -143,7 +156,10 @@ project_hackathon/
 ├── qiuzhen-proxy/           # ★V2.7/★V2.8 CF Worker 代理（独立目录，非扩展包）：
 │   │                        #   worker.js（透明代理 + /auth/redeem + /auth/refresh + JWT 鉴权 + sub 限流）
 │   │                        #   wrangler.toml / DEPLOY.md（Secrets 清单与上线步骤）
-├── v1.5_UPGRADE.md / v2.0_UPGRADE.md / v2.5_UPGRADE.md / v2.6_UPGRADE.md / upgrade.md
+├── .env/                    # 本地敏感/环境文件（gitignored）：metaso_endpoint.txt 覆盖文件等
+├── docs/                    # 升级要求与分支说明：v1.5~v2.7_UPGRADE.md / branch_evolution_guide.md / INSTALL.md
+├── search_system_P0_P1_modification_spec.md        # ★V2.9 spec：P0-P1 决策权统一（已入库）
+├── search_system_post_P0_P1_next_stage.md          # ★V2.9 spec：可访问性/身份/溯源/绑定（已入库）
 └── WORKPLAN.md              # 迭代计划与交付记录（git tag 对应各里程碑）
 ```
 
@@ -175,6 +191,7 @@ project_hackathon/
 | v2.6 | `v2.6`（合并 PR #2，`b578762`） | 证据定向与溯源：Evidence Targeting 前置层、双核普遍召回（取消硬路由）、八维评分、Academic Exact-Source（TARGET_PAPER/RELATED_PAPER）、Provenance Tracing 共同上游检测、Evidence Binding 六项硬校验、知乎超链接论文引用修复 |
 | v2.7 | `v2.7`（人工改造 `55613f0`+`b49a72b`） | 安全代理：CF Workers 透明代理（qiuzhen-proxy/）、gen-config 双模式（PROXY 零密钥/DIRECT）、7 模块三件套适配、可安全分发 |
 | v2.8 | `v2.8` | 登录门禁：邀请码 + JWT（/auth/redeem + /auth/refresh）、JWT 鉴权（静态表 fallback）、扩展登录 UI（storage.local 持久化 + 静默刷新）、sub 限流 |
+| v2.9 | algorizm_fix 分支（未打 tag，HEAD=`32565e8`） | 检索算法闭环：Evidence Target 唯一决策源 + eventFit 兼容门控、temporalMode 时间语义、URL 可访问性元数据、数值结构化抽取（evidence-extractor）、递归溯源（深度≤3+官方域定向）、platform/publisher/claimedOrigin 身份三层、当前页进候选池、动态事实「截至」参考时间、结论数字↔证据数字绑定 |
 
 ## 开发
 
