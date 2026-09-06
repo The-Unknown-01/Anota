@@ -202,7 +202,21 @@
       } catch (e) { /* context invalidated */ }
       return;
     }
-    analyze(); // idle / error → 重新分析（缓存命中时 SW 秒回）
+    // idle / error → 先确认登录态（V2.8：PROXY 模式未登录必须先登录，不能直接调 API）
+    try {
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_STATE }, function (resp) {
+        void chrome.runtime.lastError;
+        var st = resp && resp.ok && resp.state;
+        if (st && st.mode === 'proxy' && !st.loggedIn) {
+          // 未登录：打开 Side Panel 引导登录（panel 顶部显示登录按钮/弹层），不触发分析
+          try {
+            chrome.runtime.sendMessage({ type: WCC_MSG.OPEN_PANEL_FOR_DOCUMENT, docUrl: location.href, docTitle: document.title || '' }, function () {});
+          } catch (e2) { /* context invalidated */ }
+          return;
+        }
+        analyze(); // 已登录或 DIRECT 模式 → 正常分析（缓存命中时 SW 秒回）
+      });
+    } catch (e) { /* context invalidated */ }
   }
 
   // ---------- 对外（U3 Hover 用） ----------

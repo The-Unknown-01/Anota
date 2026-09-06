@@ -82,11 +82,35 @@
     return out;
   }
 
-  // readUrl(url, opts) -> Promise<{ ok:true, text, title, html? } | { ok:false, reason }>
+  // 从 HTML 提取 canonical URL（<link rel="canonical" href="...">，属性顺序不敏感）
+  function extractCanonical(html) {
+    var s = String(html || '');
+    var re = /<link\b[^>]*>/gi;
+    var m;
+    while ((m = re.exec(s)) !== null) {
+      var tag = m[0];
+      if (/rel\s*=\s*["']?canonical["']?/i.test(tag)) {
+        var hm = tag.match(/href\s*=\s*["']([^"']+)["']/i);
+        if (hm) return hm[1].trim();
+      }
+    }
+    return null;
+  }
+
+  // 正文过薄时的尽力分类（启发式，非硬事实——普通 fetch 无法精确区分 JS 渲染/登录/反爬）
+  function classifyThinContent(html) {
+    var h = String(html || '').toLowerCase();
+    if (/(登录|login|sign\s?in|验证码|captcha)/.test(h)) return 'LOGIN_REQUIRED';
+    if (/(enable\s?javascript|请.{0,6}(?:启用|开启).{0,4}(?:javascript|js|脚本))/i.test(h)) return 'JS_REQUIRED';
+    if (/<(script|noscript)[^>]*>/.test(h) && /(react|vue|angular|__nuxt|__next|window\.__|id\s*=\s*["'](root|app)["'])/.test(h)) return 'JS_REQUIRED';
+    return 'EMPTY_CONTENT';
+  }
+
+  // readUrl(url, opts) -> Promise<{ ok:true, text, title, html?, ...meta } | { ok:false, reason, accessStatus?, ...meta }>
   // opts.wantHtml=true 时额外返回原始 HTML（供 extractLinks / 显式来源提取使用）
   function readUrl(url, opts) {
     if (!url || !/^https?:\/\//i.test(url)) {
-      return Promise.resolve({ ok: false, reason: 'invalid_url' });
+      return Promise.resolve({ ok: false, reason: 'invalid_url', accessStatus: 'INVALID_URL', requestedUrl: url, fetchedAt: Date.now() });
     }
     var controller = new AbortController();
     var timer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
@@ -101,29 +125,44 @@
       }
     }).then(function (resp) {
       clearTimeout(timer);
-      if (!resp.ok) return { ok: false, reason: 'http_' + resp.status };
+      // Phase 1：统一记录硬事实（finalUrl/redirected/status/fetchedAt）；完整 redirectChain fetch 拿不到，不做
+      var meta = { requestedUrl: url, finalUrl: resp.url || url, redirected: !!resp.redirected, status: resp.status, fetchedAt: Date.now() };
+      if (!resp.ok) {
+        var as = resp.status === 404 || resp.status === 410 ? 'NOT_FOUND'
+               : resp.status === 401 ? 'LOGIN_REQUIRED'
+               : resp.status === 403 ? 'BLOCKED'
+               : 'HTTP_' + resp.status;
+        return Object.assign({ ok: false, reason: 'http_' + resp.status, accessStatus: as }, meta);
+      }
       var ct = resp.headers.get('content-type') || '';
       if (ct.indexOf('html') < 0 && ct.indexOf('text') < 0 && ct.indexOf('json') < 0) {
-        return { ok: false, reason: 'not_html' };
+        return Object.assign({ ok: false, reason: 'not_html', accessStatus: 'NOT_HTML' }, meta);
       }
       // 大小防护：最多读 2MB
       var lenHeader = parseInt(resp.headers.get('content-length') || '0', 10);
-      if (lenHeader > 2 * 1024 * 1024) return { ok: false, reason: 'too_large' };
+      if (lenHeader > 2 * 1024 * 1024) {
+        return Object.assign({ ok: false, reason: 'too_large', accessStatus: 'TOO_LARGE', contentLength: lenHeader }, meta);
+      }
       return resp.text().then(function (html) {
         if (html.length > 2 * 1024 * 1024) html = html.slice(0, 2 * 1024 * 1024);
         var title = '';
         var tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         if (tm) title = tm[1].replace(/<[^>]+>/g, '').trim().slice(0, 120);
+        var canonicalUrl = extractCanonical(html);
         var text = pickMainBody(htmlToText(html));
-        if (text.length < MIN_BODY_LEN) return { ok: false, reason: 'thin_content' };
-        var res = { ok: true, text: text.slice(0, MAX_TEXT), title: title };
+        var m2 = { requestedUrl: url, finalUrl: meta.finalUrl, redirected: meta.redirected, status: meta.status, fetchedAt: meta.fetchedAt, contentLength: html.length, canonicalUrl: canonicalUrl };
+        if (text.length < MIN_BODY_LEN) {
+          // 正文过薄：尽力分类（登录墙/JS 渲染/空内容），不代表"不存在"
+          return Object.assign({ ok: false, reason: 'thin_content', accessStatus: classifyThinContent(html) }, m2);
+        }
+        var res = Object.assign({ ok: true, accessStatus: meta.redirected ? 'REDIRECTED' : 'READABLE', text: text.slice(0, MAX_TEXT), title: title }, m2);
         if (opts && opts.wantHtml) res.html = html;
         return res;
       });
     }).catch(function (err) {
       clearTimeout(timer);
       var reason = err && err.name === 'AbortError' ? 'timeout' : 'fetch_failed';
-      return { ok: false, reason: reason };
+      return { ok: false, reason: reason, accessStatus: reason === 'timeout' ? 'TIMEOUT' : 'NETWORK_ERROR', requestedUrl: url, fetchedAt: Date.now() };
     });
   }
 
@@ -136,6 +175,11 @@
       chain = chain.then(function (acc) {
         return readUrl(it.url).then(function (r) {
           var copy = Object.assign({}, it);
+          // Phase 1：访问元数据传递到候选（供下游区分"打不开"与"不存在/不可信"）
+          if (r.accessStatus) copy.accessStatus = r.accessStatus;
+          if (r.finalUrl) copy.finalUrl = r.finalUrl;
+          if (r.canonicalUrl) copy.canonicalUrl = r.canonicalUrl;
+          copy.redirected = !!r.redirected;
           if (r.ok) { copy.content = r.text; copy.contentTitle = r.title; }
           else { copy.readError = r.reason; }
           acc.push(copy);
@@ -152,6 +196,8 @@
     readAll: readAll,
     htmlToText: htmlToText,
     extractLinks: extractLinks,
+    extractCanonical: extractCanonical,
+    classifyThinContent: classifyThinContent,
     MAX_TEXT: MAX_TEXT
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

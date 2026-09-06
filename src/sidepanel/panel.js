@@ -41,7 +41,8 @@
     results: {},          // mode -> { result, cached }
     verified: {},         // claimId -> supportLevel（概览已核实统计）
     analyzing: false,
-    seq: 0                // 丢弃过期响应（连续深读时旧响应作废）
+    seq: 0,               // 丢弃过期响应（连续深读时旧响应作废）
+    reqSeq: 0             // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
   };
 
   var CLAIM_TYPE_NAMES = { fact: '事实', number: '数字', causal: '因果', compare: '比较', predict: '预测', define: '定义', person: '人物事件', other: '其他', opinion: '观点' };
@@ -58,6 +59,232 @@
   };
 
   var MODE_NAMES = { truth: '求真', deep: '求深', differ: '求异' };
+
+  // ---------- V3.0 M0：求真直播剧场（真实管线阶段） ----------
+  var TRUTH_STAGES = [
+    { id: 'understand', label: '理解目标', hint: '判断声明类型与要找的证据' },
+    { id: 'search',     label: '多路检索', hint: 'Exa/metaso 等多引擎并行召回' },
+    { id: 'filter',     label: '筛出来源', hint: '去重 → 可信先验 → 身份分析 → 聚簇 → 八维评分' },
+    { id: 'trace',      label: '递归溯源', hint: '顺着引用追到源头（深度≤3、命中官方即停）' },
+    { id: 'verify',     label: '逐条核对', hint: '读原文比对声明（存在≠相关≠支持）' },
+    { id: 'bind',       label: '绑定结论', hint: '证据编号绑定 + 硬校验 + 数字核对' }
+  ];
+  // V3.0 filter 子流水线：筛出来源的内部步骤（数据逐级流动、默认展开）
+  var FILTER_SUBSTEPS = [
+    { id: 'dedupe',          label: 'URL 去重',      hint: '等待' },
+    { id: 'page_candidate',  label: '当前页候选',    hint: '等待' },
+    { id: 'registry',        label: '可信先验',      hint: '等待' },
+    { id: 'source_analysis', label: '身份分析',      hint: '等待' },
+    { id: 'academic',        label: '论文验证',      hint: '等待' },
+    { id: 'clusters',        label: '证据聚簇',      hint: '等待' },
+    { id: 'score',           label: '八维评分',      hint: '等待' }
+  ];
+  var TIER_ZH = { verified: '可信', restricted: '受限', candidate: '候选', unknown: '未识别' };
+  var DUPLEVEL_ZH = { duplicate: '重复', likely: '疑似转载', possible: '可能转载', independent: '独立' };
+  var filterSubDoms = {}; // subId -> { row, value }
+
+  // 生成 filter 子步骤的可视化数据文本（原始数据，默认展示）
+  function filterSubText(sub, detail) {
+    var d = detail || {};
+    switch (sub) {
+      case 'dedupe': return d.rawCount + ' → ' + d.keptCount + '（丢弃 ' + d.droppedCount + '）';
+      case 'page_candidate': return d.added ? '已加入当前页作为候选' : (d.hasContextPage ? '当前页已在候选/重复' : '无当前页上下文');
+      case 'registry': {
+        if (!d.dist) return '统计中';
+        var parts = Object.keys(d.dist).map(function (k) { return (TIER_ZH[k] || k) + ' ' + d.dist[k]; });
+        return parts.join(' · ') || '—';
+      }
+      case 'source_analysis': {
+        var parts2 = [];
+        if (d.typeDist) {
+          parts2.push('类型 ' + Object.keys(d.typeDist).map(function (k) { return k + ':' + d.typeDist[k]; }).join(' '));
+        }
+        if (d.originDist) {
+          parts2.push('一手 ' + (d.originDist.original || 0) + ' / 转载 ' + ((d.originDist.syndicated || 0) + (d.originDist.syndicated_likely || 0)));
+        }
+        return parts2.join(' · ') || '分析中';
+      }
+      case 'academic': return d.skipped ? '非论文声明，跳过' : ('目标 ' + d.target + ' · 相关 ' + d.related);
+      case 'clusters': {
+        var parts3 = ['簇 ' + d.clusterCount];
+        if (d.dupLevels) {
+          Object.keys(d.dupLevels).forEach(function (k) { if (d.dupLevels[k] > 0) parts3.push(DUPLEVEL_ZH[k] + ' ' + d.dupLevels[k]); });
+        }
+        return parts3.join(' · ');
+      }
+      case 'score': {
+        if (d.topScore == null) return '打分中';
+        var txt = 'Top ' + d.topScore.toFixed(0);
+        if (d.dims) txt += ' · 权威' + (d.dims.authority || 0).toFixed(0) + ' 相关' + (d.dims.relevance || 0).toFixed(0);
+        if (d.topTitle) txt += ' · ' + d.topTitle;
+        return txt;
+      }
+      default: return '';
+    }
+  }
+  // 当前剧场各阶段 DOM（phase id -> { row, sub, dot }）
+  var theater = {};
+  var ENGINES_ZH = { exa: 'Exa', metaso: 'metaso', zhihu: '知乎', explicit: '原文', current_page: '当前页' };
+
+  // ---------- V3.0 M0b：渐进式产出（候选来源先上屏、逐条点亮） ----------
+  var previewBox = document.getElementById('candidate-preview');
+  var candidateList = document.getElementById('candidate-list');
+  var SOURCE_TYPE_ZH = { gov: '官方', media: '媒体', academic: '学术', org: '机构', industry: '行业', community: '社区', corporate: '企业', paper: '论文', other: '其他' };
+
+  // 用 title/url 去重：同一来源可能先出现在 search preview 再出现在 sortedPreview
+  var previewSeen = {};
+
+  function resetPreview() {
+    if (!candidateList) return;
+    candidateList.innerHTML = '';
+    previewSeen = {};
+    if (previewBox) previewBox.hidden = true;
+  }
+
+  // items: [{title,url,sourceType?,originality?,engine}]；mode: 'raw'（灰占位）/ 'sorted'（点亮+徽章）
+  function appendPreview(items, mode) {
+    if (!candidateList || !items || !items.length) return;
+    if (previewBox) previewBox.hidden = false;
+    items.forEach(function (it) {
+      if (!it || !it.title) return;
+      var key = it.url || it.title;
+      if (previewSeen[key]) return; // 已在列表（去重）
+      previewSeen[key] = true;
+      var li = document.createElement('li');
+      li.className = 'cand ' + (mode === 'sorted' ? 'lit' : 'dim');
+      var type = document.createElement('span');
+      type.className = 'cand-type';
+      type.textContent = mode === 'sorted' ? (SOURCE_TYPE_ZH[it.sourceType] || '其他') : (ENGINES_ZH[it.engine] || '');
+      var title = document.createElement('span');
+      title.className = 'cand-title';
+      title.textContent = it.title;
+      var meta = document.createElement('span');
+      meta.className = 'cand-meta';
+      meta.textContent = mode === 'sorted' ? (it.originality || '') : '';
+      li.appendChild(type); li.appendChild(title); li.appendChild(meta);
+      candidateList.appendChild(li);
+    });
+  }
+
+  function stageSubText(phase, detail) {
+    // 生成阶段完成摘要（V1：完成阶段收起为一行摘要；进行中阶段展开 hint）
+    if (!detail) return null;
+    var d = detail;
+    switch (phase) {
+      case 'understand':
+        return ['已理解目标', d.questionType ? '类型=' + d.questionType : '', d.targetType ? '目标=' + d.targetType : ''].filter(Boolean).join(' · ');
+      case 'search': {
+        var en = [];
+        if (d.engine) en.push((ENGINES_ZH[d.engine] || d.engine) + ' ' + (d.hits || 0) + ' 条');
+        if (d.rawCount != null) en.push('共 ' + d.rawCount + ' 条原始结果');
+        return en.join(' · ') || null;
+      }
+      case 'filter': {
+        var parts = ['筛出 ' + (d.uniqueCount != null ? d.uniqueCount : '?') + ' 个候选'];
+        if (d.engineBreakdown) {
+          parts.push(Object.keys(d.engineBreakdown).map(function (k) { return (ENGINES_ZH[k] || k) + ' ' + d.engineBreakdown[k]; }).join(' / '));
+        }
+        return parts.join(' · ');
+      }
+      case 'trace':
+        return '追到 ' + (d.upstreamCount != null ? d.upstreamCount : 0) + ' 个上游' + ((d.stops && d.stops.length) ? '（停止：' + d.stops.join(',') + '）' : '');
+      case 'verify':
+        return '核对 ' + (d.readsOk != null ? d.readsOk : '?') + ' 条证据' + (d.error ? '（' + d.error + '）' : '');
+      case 'bind':
+        return '绑定完成' + (d.evidenceCount != null ? ' · ' + d.evidenceCount + ' 条证据' : '') + (d.verdict ? ' · ' + d.verdict : '');
+      default: return null;
+    }
+  }
+
+  function buildTheater() {
+    if (!els.loadingSteps) return;
+    els.loadingSteps.innerHTML = '';
+    theater = {};
+    filterSubDoms = {};
+    resetPreview(); // V3.0 M0b：候选区随剧场重建
+    TRUTH_STAGES.forEach(function (s, i) {
+      var li = document.createElement('li');
+      li.className = 'stage' + (i === 0 ? ' doing' : ''); // V1：第一行乐观展开（真实事件到达后接管）
+      li.dataset.phase = s.id;
+      var dot = document.createElement('span');
+      dot.className = 'stage-dot';
+      var name = document.createElement('span');
+      name.className = 'stage-name';
+      name.textContent = s.label;
+      var sub = document.createElement('span');
+      sub.className = 'stage-sub';
+      sub.textContent = s.hint; // V1：当前进行阶段细节默认展开
+      li.appendChild(dot); li.appendChild(name); li.appendChild(sub);
+      // V3.0 filter 子流水线：7 个内部步骤图形化挂到 filter 行内
+      if (s.id === 'filter') {
+        var flow = document.createElement('ul');
+        flow.className = 'stage-subflow';
+        FILTER_SUBSTEPS.forEach(function (fs) {
+          var row = document.createElement('li');
+          row.className = 'subflow-node wait';
+          row.dataset.sub = fs.id;
+          var num = document.createElement('span');
+          num.className = 'subflow-num';
+          num.textContent = String(Array.prototype.indexOf.call(FILTER_SUBSTEPS, fs) + 1);
+          var lbl = document.createElement('span');
+          lbl.className = 'subflow-label';
+          lbl.textContent = fs.label;
+          var val = document.createElement('span');
+          val.className = 'subflow-value';
+          val.textContent = '…';
+          row.appendChild(num); row.appendChild(lbl); row.appendChild(val);
+          flow.appendChild(row);
+          filterSubDoms[fs.id] = { row: row, value: val };
+        });
+        li.appendChild(flow);
+      }
+      els.loadingSteps.appendChild(li);
+      theater[s.id] = { row: li, sub: sub };
+    });
+  }
+
+  // 阶段状态更新（status: start/engine/done/error/sub）
+  function applyStage(st) {
+    if (!st || !st.phase || !theater[st.phase]) return;
+    // V3.0 filter 子流水线：sub 事件驱动子步骤点亮（数据默认展开）
+    if (st.status === 'sub' && st.phase === 'filter' && filterSubDoms[st.detail.sub]) {
+      var fs = filterSubDoms[st.detail.sub];
+      fs.row.classList.remove('wait');
+      fs.row.classList.add('done');
+      fs.value.textContent = filterSubText(st.detail.sub, st.detail);
+      return;
+    }
+    var t = theater[st.phase];
+    t.row.classList.remove('doing', 'done', 'error');
+    if (st.status === 'start') {
+      t.row.classList.add('doing');
+      t.sub.textContent = (TRUTH_STAGES.filter(function (s) { return s.id === st.phase; })[0] || {}).hint || '进行中';
+    } else if (st.status === 'engine') {
+      // 检索中某引擎返回：追加实时行（V3.0 渐进式细节）
+      var add = stageSubText('search', st.detail);
+      if (add && t.sub.textContent.indexOf(add) === -1) {
+        var cur = t.sub.textContent;
+        var parts = cur.split(' · ').filter(function (p) { return p; });
+        parts.push(add);
+        // 只保留最近 3 条引擎消息 + 末尾原始计数
+        t.sub.textContent = parts.slice(-4).join(' · ');
+      }
+      t.row.classList.add('doing');
+    } else if (st.status === 'done') {
+      t.row.classList.add('done');
+      var sub = stageSubText(st.phase, st.detail) || ((TRUTH_STAGES.filter(function (s) { return s.id === st.phase; })[0] || {}).hint || '完成');
+      t.sub.textContent = sub;
+      // V3.0 M0b：渐进式产出——search done 上屏候选占位；filter done 升级点亮带徽章
+      if (st.phase === 'search' && st.detail && st.detail.preview) {
+        appendPreview(st.detail.preview, 'raw');
+      } else if (st.phase === 'filter' && st.detail && st.detail.sortedPreview) {
+        appendPreview(st.detail.sortedPreview, 'sorted');
+      }
+    } else if (st.status === 'error') {
+      t.row.classList.add('error');
+      t.sub.textContent = stageSubText(st.phase, st.detail) || '此步未成功';
+    }
+  }
 
   // ---------- 视图切换 ----------
 
@@ -100,6 +327,14 @@
   }
 
   function showLoading() {
+    if (state.mode === 'truth') {
+      // V3.0 M0：求真直播剧场——真实管线阶段（由 ANALYZE_STAGE 事件驱动，不再假进度）
+      els.loadingTitle.textContent = '求真分析中……';
+      buildTheater();
+      show(els.loading);
+      return;
+    }
+    // deep/differ：轻量步骤提示（V3.0 M2 再接入事件直播）
     els.loadingTitle.textContent = MODE_NAMES[state.mode] + '分析中……';
     els.loadingSteps.innerHTML = '';
     LOADING_STEPS[state.mode].forEach(function (s, i) {
@@ -118,6 +353,7 @@
   function showError(reason) {
     var map = {
       config_missing: ['未配置 API Key', '请在项目根放置 deepseek_api.key 并运行 node scripts/gen-config.js，然后重新加载扩展'],
+      needs_login: ['需要登录', '请点击右上角「登录」输入邀请码后使用'],
       http_401: ['鉴权失败', 'API Key 无效或已过期'],
       http_402: ['额度不足', 'DeepSeek 账户余额不足'],
       http_429: ['请求过于频繁', '请稍后再试'],
@@ -128,6 +364,8 @@
     els.errorDetail.textContent = m[1];
     hide(els.result); hide(els.loading);
     show(els.error);
+    // V2.8：未登录时自动展开登录弹层，引导输入邀请码
+    if (reason === 'needs_login') openAuthPanel();
   }
 
   // ---------- 分析流程 ----------
@@ -137,10 +375,12 @@
     if (force) delete state.results[mode];
     state.analyzing = true;
     state.mode = mode;
+    state.reqSeq = (state.reqSeq || 0) + 1; // V3.0：本请求的舞台事件序号
+    var myReq = state.reqSeq;
     renderView();
     try {
       chrome.runtime.sendMessage(
-        { type: WCC_MSG.ANALYZE, mode: mode, payload: state.claimPayload },
+        { type: WCC_MSG.ANALYZE, mode: mode, payload: state.claimPayload, requestId: myReq },
         function (resp) {
           void chrome.runtime.lastError;
           if (seq !== state.seq) return; // 已有新 Claim/模式，丢弃过期响应
@@ -192,6 +432,115 @@
 
   function esc(s) { return String(s == null ? '' : s); }
 
+  // ---------- V3.0 M1：证据网络图渲染 ----------
+  var NET_GROUP_META = {
+    support:    { cls: 'support', zh: '支持结论' },
+    contradict: { cls: 'contradict', zh: '矛盾证据' },
+    unknown:    { cls: 'unknown', zh: '未判定' }
+  };
+  var NET_SOURCE_TYPE_ZH = { gov: '官方', media: '媒体', academic: '学术', org: '机构', zhihu: '知乎', community: '社区', corporate: '企业', paper: '论文', other: '网页' };
+
+  // 渲染证据网络卡（模型由 evidence-network.js 构造；纯展示）
+  // 注意：panel.js 是无参 IIFE，无 global 变量——必须用 globalThis 访问共享模块
+  function renderNetworkCard(verification, result) {
+    var NET = (typeof globalThis !== 'undefined') ? globalThis.WCC_EVIDENCE_NETWORK : null;
+    if (!NET || !NET.buildEvidenceNetwork) return null;
+    var model = NET.buildEvidenceNetwork(verification, result);
+    var totalNodes = model.groups.support.length + model.groups.contradict.length + model.groups.unknown.length;
+    if (!totalNodes) return null;
+
+    var card = cardWith('证据网络');
+    var wrapper = el('div', 'net-wrap');
+    // —— 结论节点 ——
+    var concl = el('div', 'net-conclusion');
+    concl.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
+    concl.appendChild(el('div', 'net-conclusion-text', esc(model.summary || result.summary || '')));
+    // 数字绑定总览：结论声称的数字 vs 支持证据中实际找到的
+    if (model.claimedTokens.length) {
+      var numRow = el('div', 'net-nums');
+      numRow.appendChild(el('span', 'net-nums-label', '数字核对'));
+      model.claimedTokens.forEach(function (tok) {
+        var found = model.groups.support.some(function (n) { return n.matched.indexOf(tok) >= 0; });
+        var chip = el('span', 'num-chip ' + (found ? 'ok' : 'miss'), (found ? '✓ ' : '✗ ') + tok);
+        chip.title = found ? '在支持证据中找到 ' + tok : '支持证据中未找到 ' + tok + '（结论已自动保守处理）';
+        numRow.appendChild(chip);
+      });
+      concl.appendChild(numRow);
+    }
+    wrapper.appendChild(concl);
+    // 连接线（结论 ↓ 证据）
+    wrapper.appendChild(el('div', 'net-edge'));
+
+    // —— 证据节点分组：支持左/绿、矛盾右/红（并排对照）；窄栏自动纵向 ——
+    var groupsRow = el('div', 'net-groups');
+    model.groupOrder.forEach(function (g) {
+      var nodes = model.groups[g];
+      if (!nodes.length) return;
+      var meta = NET_GROUP_META[g];
+      var col = el('div', 'net-group ' + meta.cls);
+      var head = el('div', 'net-group-head');
+      head.appendChild(el('span', 'net-group-count', meta.zh + ' · ' + nodes.length));
+      col.appendChild(head);
+      nodes.slice(0, 4).forEach(function (n) { col.appendChild(buildNetNode(n, g)); });
+      groupsRow.appendChild(col);
+    });
+    wrapper.appendChild(groupsRow);
+
+    // —— 溯源链（递归溯源到源头：媒体 → 官方） ——
+    var prov = model.provenance;
+    if (prov && prov.upstreamHits && prov.upstreamHits.length) {
+      var traceCard = el('div', 'net-trace');
+      traceCard.appendChild(el('div', 'net-trace-title', '溯源链（追到源头）'));
+      prov.upstreamHits.slice(0, 5).forEach(function (h) {
+        if (!h || !h.from) return;
+        var line = el('div', 'net-trace-line');
+        line.appendChild(el('a', 'net-trace-from', esc(shortHost(h.from))));
+        line.href = h.from; line.target = '_blank'; line.rel = 'noopener';
+        line.appendChild(el('span', 'net-trace-arrow', '→'));
+        var hitA = el('a', 'net-trace-hit', esc((h.hit && (h.hit.title || shortHost(h.hit.url))) || '源头'));
+        hitA.href = (h.hit && h.hit.url) || h.from; hitA.target = '_blank'; hitA.rel = 'noopener';
+        line.appendChild(hitA);
+        if (h.depth != null) line.appendChild(el('span', 'net-trace-depth', '第 ' + h.depth + ' 跳'));
+        if (h.kind) line.appendChild(el('span', 'net-trace-kind', h.kind === 'explicit_link' ? '原文引用' : '检索'));
+        traceCard.appendChild(line);
+      });
+      wrapper.appendChild(traceCard);
+    }
+
+    card.appendChild(wrapper);
+    return card;
+  }
+
+  function shortHost(u) {
+    try { var h = new URL(u).hostname; return h.replace(/^www\./, ''); } catch (e) { return String(u || '').slice(0, 40); }
+  }
+
+  function buildNetNode(n, group) {
+    var node = el('div', 'net-node ' + NET_GROUP_META[group].cls);
+    var head = el('div', 'net-node-head');
+    head.appendChild(el('span', 'net-node-verdict', n.judgmentZh || ''));
+    var titleA = el('a', 'net-node-title', esc(n.title));
+    titleA.href = n.url; titleA.target = '_blank'; titleA.rel = 'noopener';
+    head.appendChild(titleA);
+    node.appendChild(head);
+    var tags = el('div', 'net-node-tags');
+    tags.appendChild(el('span', 'src-badge', NET_SOURCE_TYPE_ZH[n.sourceType] || '网页'));
+    if (n.registryVerified) tags.appendChild(el('span', 'src-badge net-verified', '✓可信域'));
+    if (n.originality === '一手') tags.appendChild(el('span', 'src-original', '一手'));
+    else if (n.originality === '疑似转载') tags.appendChild(el('span', 'src-synd', '疑似转载'));
+    if (n.scoreTotal != null) tags.appendChild(el('span', 'net-node-score', '分 ' + n.scoreTotal));
+    node.appendChild(tags);
+    if (n.readError) node.appendChild(el('div', 'net-node-note', n.readError === 'not_read' ? '原文不可读' : '读取失败'));
+    else if (n.recovered) node.appendChild(el('div', 'net-node-note', '已恢复可访问版本'));
+    if (n.quote) node.appendChild(el('div', 'net-node-quote', '「' + esc(n.quote) + '」'));
+    if (n.matched && n.matched.length) {
+      var mRow = el('div', 'net-node-matched');
+      n.matched.forEach(function (tok) { mRow.appendChild(el('span', 'num-chip ok', '✓ ' + tok)); });
+      node.appendChild(mRow);
+    }
+    return node;
+  }
+
   function renderTruth(result, entry) {
     var pane = els.panes.truth;
     pane.innerHTML = '';
@@ -225,6 +574,12 @@
       c1.appendChild(metaLine);
     }
     pane.appendChild(c1);
+
+    // V3.0 M1：证据网络图（结论 → 支持/矛盾证据分组 + 数字绑定 + 溯源链；v3.0_UPGRADE §3.3）
+    if (entry && entry.verification && Array.isArray(entry.verification.evidences)) {
+      var netCard = renderNetworkCard(entry.verification, result);
+      if (netCard) pane.appendChild(netCard);
+    }
 
     // V2.5 溯源来源（verifyClaimV25 候选列表：已排序、带六维评分与 whyText）
     var v25Candidates = entry && entry.verification && entry.verification.candidates;
@@ -606,6 +961,110 @@
     wrap.appendChild(el('div', 'orb o2'));
     document.body.prepend(wrap);
   })();
+
+  // ---------- V2.8 登录门禁（邀请码 + JWT；仅代理模式显示入口） ----------
+
+  var authArea = document.getElementById('auth-area');
+  var authLoginBtn = document.getElementById('auth-login-btn');
+  var authUser = document.getElementById('auth-user');
+  var authLogoutBtn = document.getElementById('auth-logout-btn');
+  var authPanel = document.getElementById('auth-panel');
+  var authInput = document.getElementById('auth-code-input');
+  var authSubmit = document.getElementById('auth-submit');
+  var authCancel = document.getElementById('auth-cancel');
+  var authError = document.getElementById('auth-error');
+  var authHint = document.getElementById('auth-hint');
+
+  function renderAuth(state) {
+    if (!authArea) return;
+    // DIRECT 模式（本地密钥）无登录概念 → 整区隐藏
+    if (!state || state.mode !== 'proxy') { authArea.hidden = true; return; }
+    authArea.hidden = false;
+    authLoginBtn.hidden = !!state.loggedIn;
+    authUser.hidden = !state.loggedIn;
+    authLogoutBtn.hidden = !state.loggedIn;
+    if (state.loggedIn) authUser.textContent = state.alias || '已登录';
+  }
+
+  function refreshAuthState() {
+    chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_STATE }, function (resp) {
+      void chrome.runtime.lastError;
+      if (resp && resp.ok) {
+        renderAuth(resp.state);
+        // V2.8：PROXY 未登录且无 Claim 工作台（悬浮球引导路径）→ 自动展开登录弹层
+        if (resp.state && resp.state.mode === 'proxy' && !resp.state.loggedIn && !state.claimPayload) {
+          openAuthPanel();
+        }
+      } else renderAuth(null);
+    });
+  }
+
+  // V2.8：展开登录弹层（悬浮球/API 被门禁拦截时引导登录）
+  function openAuthPanel() {
+    if (!authPanel) return;
+    if (authHint) authHint.hidden = true;
+    authPanel.hidden = false;
+    authError.hidden = true;
+    authInput.value = '';
+    authInput.focus();
+  }
+
+  if (authArea) {
+    authLoginBtn.addEventListener('click', openAuthPanel);
+    authCancel.addEventListener('click', function () { authPanel.hidden = true; });
+    authLogoutBtn.addEventListener('click', function () {
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGOUT }, function () {
+        void chrome.runtime.lastError;
+        refreshAuthState();
+      });
+    });
+    function submitCode() {
+      var code = authInput.value.trim();
+      if (!code) return;
+      authSubmit.disabled = true;
+      authError.hidden = true;
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGIN, inviteCode: code }, function (resp) {
+        void chrome.runtime.lastError;
+        authSubmit.disabled = false;
+        if (resp && resp.ok) {
+          authPanel.hidden = true;
+          refreshAuthState();
+          // V2.8：登录成功后自动重触发当前分析（面板刚被拦截的路径）
+          if (state.claimPayload && !state.analyzing) {
+            renderView(); // 无缓存 → startAnalysis 自动触发
+          } else if (authHint) {
+            // 悬浮球路径（无 Claim）：提示用户再点悬浮球即可开始扫描
+            authHint.textContent = '已开通 ✓ 现在回到网页点击右上角「求」悬浮球即可开始全文扫描';
+            authHint.hidden = false;
+          }
+        } else {
+          var reason = (resp && resp.reason) || 'login_failed';
+          var msgMap = {
+            invalid_invite_code: '邀请码无效，请检查后重试',
+            auth_not_configured: '登录服务未配置',
+            auth_timeout: '网络超时，请重试',
+            auth_network_error: '网络错误，请重试'
+          };
+          authError.textContent = msgMap[reason] || '登录失败，请重试';
+          authError.hidden = false;
+        }
+      });
+    }
+    authSubmit.addEventListener('click', submitCode);
+    authInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitCode(); });
+
+    refreshAuthState();
+  }
+
+  // ---------- V3.0 M0：分析阶段直播监听（SW → panel） ----------
+  // 只在「求真」进行中且 requestId 匹配当前请求时更新剧场；
+  // 任意阶段出现 error（如引擎全挂）时由后台自动降级继续，UI 按最终响应渲染。
+  chrome.runtime.onMessage.addListener(function (msg) {
+    if (!msg || msg.type !== WCC_MSG.ANALYZE_STAGE) return;
+    if (!state.analyzing || state.mode !== 'truth') return;
+    if (msg.requestId !== state.reqSeq) return; // 过期请求的事件丢弃
+    applyStage(msg.stage);
+  });
 
   renderView();
 })();

@@ -13,6 +13,11 @@
       // 政府
       { pattern: '\\.gov\\.cn$', label: '中国政府' },
       { pattern: '(\\.|^)gov$', label: '外国政府' },
+      { pattern: '(\\.|^)gov\\.uk$', label: '英国政府' },
+      { pattern: '(\\.|^)gov\\.au$', label: '澳大利亚政府' },
+      { pattern: '(\\.|^)go\\.jp$', label: '日本政府' },
+      { pattern: '(\\.|^)gouv\\.fr$', label: '法国政府' },
+      { pattern: '(\\.|^)gov\\.[a-z]{2}$', label: '外国政府' },
       { pattern: '^un\\.org$', label: '联合国' },
       { pattern: '^who\\.int$', label: 'WHO' },
       { pattern: '(\\.|^)worldbank\\.org$', label: '世界银行' },
@@ -30,6 +35,7 @@
       // 国际机构（§24：NASA / ESA / FDA / EU / CDC / NIH 等）
       { pattern: '^nasa\\.gov$', label: 'NASA' },
       { pattern: '^esa\\.int$', label: 'ESA 欧洲航天局' },
+      { pattern: '(\\.|^)[a-z0-9-]+\\.int$', label: '国际组织' },
       { pattern: '^fda\\.gov$', label: '美国 FDA' },
       { pattern: '(\\.|^)europa\\.eu$', label: '欧盟' },
       { pattern: '^cdc\\.gov$', label: '美国 CDC' },
@@ -39,6 +45,9 @@
       // 学术科研
       { pattern: '\\.edu\\.cn$', label: '中国高校' },
       { pattern: '\\.edu$', label: '国外高校' },
+      { pattern: '(\\.|^)ac\\.uk$', label: '英国高校' },
+      { pattern: '(\\.|^)ac\\.jp$', label: '日本高校' },
+      { pattern: '(\\.|^)edu\\.[a-z]{2}$', label: '国外高校' },
       { pattern: '(\\.|^)cas\\.cn$', label: '中科院' },
       { pattern: '^nature\\.com$', label: 'Nature' },
       { pattern: '^science\\.org$', label: 'Science' },

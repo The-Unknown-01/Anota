@@ -6,6 +6,8 @@ release/
 node_modules/
 
 # 系统/编辑器杂项
+zhihu-skill/
+docs/zhihu_OAuth_OFFICAL.md
 .DS_Store
 Thumbs.db
 
@@ -14,4 +16,10 @@ Thumbs.db
 *.secret
 .env
 .env.*
+.env/
 src/core/generated-config.js
+proxy_base.txt
+proxy_token.txt
+invite_code.txt
+invite_codes_batch.txt
+invite_codes_merged.txt

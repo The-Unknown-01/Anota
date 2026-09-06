@@ -1,566 +1,596 @@
-# 「求真」交付工作计划（V1 已交付 · V1.5 升级计划待审批）
+# 「求真」交付工作计划（WORKPLAN）
 
-> 基于 `D:\Project\知乎黑客松2026\PRD` 全部 10 份文档 + 当前仓库现状制定。
-> 目标：在黑客松周期内交付可演示的 MVP，完整跑通「选中一句 → 深读 → 求真/求深/求异」闭环。
->
-> **2026-08-25 更新**：V1 已全部交付（M0-M4，tags m0~m4，验收 PASS）。新增 `v1.5_UPGRADE.md` 升级要求，计划见文末「V1.5 升级计划」章节，待审批。
-
----
-
-## 一、PRD 要求提炼（产品必须是什么）
-
-**产品**：Chrome Extension（Manifest V3），暂名「求真」。用户在任意网页选中一句话（Claim）→ 选区旁出现「深读」按钮 → 打开 Side Panel → 三层探索：
-
-| 模式 | 用户问题 | 核心输出 |
-|---|---|---|
-| 求真 | 这句话靠谱吗？ | 支持程度（充分/部分/不足/不支持）+ 证据链（原始来源→权威→社区）+ **原文↔来源对照** |
-| 求深 | 背后是什么？ | 原理解释 + 相关概念知识树 + 继续探索问题 |
-| 求异 | 还有别的看法吗？ | 当前观点 + 不同立场卡片 + 认知盲区 |
-
-**不可违背的产品原则**：
-1. 不改造网页本身；无操作时插件"几乎不存在"。
-2. 用户主动触发：只分析选中的一句，不默认采集整页。
-3. 不是聊天机器人：结构化结果，不是对话气泡。
-4. 找到来源 ≠ 来源支持原文：求真的差异化核心是"表述是否被夸大"的对照判断。
-5. 不制造虚假确定性：支持程度不裸奔百分比数字。
-
-**技术硬性要求**：
-- MV3 架构：content script（捕获+按钮）→ background（Active Selection 中转，`chrome.storage.session`）→ side panel（三 Tab 工作台）→ 后端。
-- API Key 不进前端 → 必须有 Backend 层承担 AI 分析与搜索。
-- 知乎开放能力：知乎搜索 / 全网搜索 / 直答 Agent 是证据与观点的主要数据源。
-- API 配额（知乎搜索 1000 次/用户/天、直答 Agent 仅 100 次/天）→ 必须做查询缓存。
-- 最小权限：优先 activeTab + scripting，避免 <all_urls>。
-- 异常处理：Loading 分步提示、Error 可重试、Empty 有语义化引导、滚动隐藏按钮、context invalidated 提示刷新。
+> 项目：知乎黑客松 2026「求真 · 深读」Chrome Extension（MV3）。
+> 本文件是全部版本的**计划与交付总账**：每个版本一节（计划 → 决策点 → 执行记录），按时间正序排列。
+> 版本升级要求的原文见 `docs/` 下 `v1.5_UPGRADE.md` ~ `v2.7_UPGRADE.md`；V2.9 依据
+> `docs/branch_evolution_guide.md` 与仓库根两份 spec（`search_system_P0_P1_modification_spec.md`、
+> `search_system_post_P0_P1_next_stage.md`）。
+> 回退锚点：git tag 与里程碑一一对应（m0~m4 / u0~u4 / v1.5 / v1.6 / v2.0 / v2.5 / v2.6 / v2.7 / v2.8）；
+> algorizm_fix 分支（V2.9）尚未打 tag（HEAD=32565e8）；V3.0 自 `v3.0-start` 起执行。
 
 ---
 
-## 二、现状分析（当前仓库 vs PRD）
+## 目录
 
-当前仓库是一个已完成的「Web Context Capture」模块（367 行 JS，纯静态零依赖，3 个 commit）：
-- content script 在**页面级静默采集**：滚动/resize/MutationObserver 触发，提取全页可见段落上报 background；
-- background 存 `chrome.storage.session`，提供 GET_CURRENT_CONTEXT 查询接口；
-- README/INSTALL 已写好，manifest 用了 `<all_urls>` host_permissions。
-
-**关键发现——方向性冲突**：
-1. **现有代码采集的是"整页上下文"，且是自动触发**；PRD 明确要求"用户主动触发、只读选中的那一句"。这不是小偏差，是产品哲学层面的相反。PRD 的隐私卖点（"我们不读你的网页，只读你主动问的那一句"）会被现有实现直接否定。
-2. 现有的 utils（消息类型常量、throttle/debounce）、background 骨架（storage.session 双写、能力检测分支）**可以复用**；paragraph-extractor / visibility-detector 与新方向无关，应移除或封存。
-3. manifest 的 `<all_urls>` 需要重新评估：PRD 技术文档明确建议避免。但注意——content script 若要"任何网页都能选中即触发"，声明式注入通常需要 host 匹配；用 activeTab 则只在点击扩展图标后生效，无法自动注入。这是需要权衡的技术决策点（见下文 D3）。
-
-**结论**：保留仓库骨架与工具函数，将"静默整页采集"重构为"主动选区捕获"，在此基础上补齐 Side Panel 与后端。
-
----
-
-## 三、开工前需要你拍板的决策点
-
-### D1. 现有"整页静默采集"模块如何处置
-- **方案 A（推荐）**：删除 paragraph-extractor / visibility-detector 及其自动采集逻辑，仓库彻底转向 PRD 方向。理由：与 PRD 隐私原则正面冲突，留着会在演示/评审时被质疑；git 历史里永远找得回来。
-- **方案 B**：封存为 `src/legacy/` 不注入，仅作参考。
-- （影响面小，但方向问题，想听你的意见）
-
-**确定方案A**
-
-### D2. 后端形态
-PRD 要求 Key 不进前端、必须有 Backend。两个选项：
-- **方案 A（推荐）**：本地 Python（FastAPI）后端，承担 LLM 编排 + 知乎 API 代理 + 缓存。黑客松演示在本机跑完全可行，开发最快。
-- **方案 B**：用 Extension 的 background service worker 直连 AI 服务商 + 知乎 API，Key 放在扩展的本地配置里（不入库）。省一个进程，但违背 PRD "Backend 层"要求，且 MV3 SW 里做缓存/编排更别扭。
-
-→ 选 A 的话：知乎开放平台的调用凭证（AppKey/Secret 或手册指定的鉴权方式）和 AI 模型的 API Key 需要你提供/确认获取方式。**这是我目前最大的外部依赖。**
-
-**确定方案B**
-
-### D3. 权限模型
-- **方案 A（推荐）**：保留 `<all_urls>` content script 匹配（保证任意网页选中即触发），但收窄 host_permissions、不申请 tabs/history 等。演示效果最顺。
-- **方案 B**：严格按 PRD 最小权限走 activeTab——代价是用户必须先点一次扩展图标授权当前页，"选中即出现深读按钮"的核心体验会打折。
-- 我倾向 A + 在 README 里说明权限用途；评审若追问隐私，主动触发原则本身就是答案。
-
-**确定方案A**
-
-### D4. AI 能力来源
-- **方案 A（推荐）**：你有现成的 LLM API（如 DeepSeek）→ 后端统一封装"求真/求深/求异"三条分析链路。
-- **方案 B**：知乎直答 Agent 承担生成（但它限额 100 次/天且形态未必适配结构化输出）。
-- 倾向 A 为主、直答 Agent 作为求真证据源之一（如果接口可用）。
-
-**确定方案A，需要用到直答时才用知乎Agent**
----
-
-## 四、分阶段执行计划
-
-> 原则：先打通端到端骨架（哪怕求真结果很糙），再逐层加厚。每阶段结束都有可手动验证的产物。
-
-### M0 · 重构对齐 PRD 方向（半天） ✅ 已交付（tag m0-selection-sidepanel）
-- 删除/封存整页采集模块（按 D1 结论）
-- 重写 content script：mouseup/keyup/selectionchange 监听 → 选区 ≥2 字符显示「深读」按钮（getBoundingClientRect 定位、滚动隐藏）
-- background 改为 Active Selection 中转：CAPTURE_SELECTION → storage.session → 广播 ACTIVE_SELECTION_UPDATED；chrome.sidePanel.open()
-- manifest 更新：sidePanel 权限、side_panel 字段、按 D3 调整权限
-- 验收：任意网页选中文字 → 按钮出现 → 点击后 Side Panel 打开并显示选中的那句话（E2E PASS）
-- **此阶段完成即 git tag**（符合你的回退习惯）
-
-### M1 · 后端最小可用（半天） ✅ 已交付（tag m1-ai-analyzer，按 D2=B 调整为 SW 直连）
-- SW 内 AI 分析链路：`ANALYZE`（mode: truth/deep/differ + claim + title + url）
-- DeepSeek 接入 + 三模式 prompt 链路（结构化 JSON 输出、缺字段自动重试）
-- Key 从 deepseek_api.key 经 gen-config 注入（gitignored，不入库）；简单内存缓存（query → 结果，防配额击穿）
-- 验收：Node 直连 API + 真实 SW 运行时，三种模式均返回合法 JSON（PASS）
-
-### M2 · Side Panel 三 Tab 工作台（1 天） ✅ 已交付（tag m2-workbench）
-- 布局：当前内容卡（Claim+来源标题）→ 求真/求深/求异 Tab → 结果区
-- 三种结果的 UI：求真=支持程度徽章+证据卡列表+原文↔来源对照块；求深=原理段落+知识树节点+继续探索问题；求异=立场卡片（🟢🟡🔴+文字标注）+认知盲区
-- Loading 分步提示 / Error 可重试 / Empty 引导态
-- 连续深读：Side Panel 开着时新选区自动更新 Claim 并重分析
-- 视觉：克制、知识感、轻量可信；Liquid Glass 元素点缀、深色模式支持（prefers-color-scheme）
-
-### M3 · 知乎开放能力接入（半天～1 天） ✅ 已交付（tag m3-zhihu-pluggable，降级态验证通过）
-- datasource.js：知乎搜索 / 全网搜索 HTTP 客户端（Bearer Access Secret 鉴权）
-- gen-config 支持可选 zhihu_api.key（兼容旧名 zhihu_access_secret.key）；无凭证自动降级
-- 证据来源分层注入 prompt；UI 显示「已核验/未联网核验」+ 检索来源链接
-- ⏳ 待凭证到位：放置 key 文件 → 重跑 gen-config → 重载扩展即启用（零代码改动）
-
-### M4 · 打磨与验收（半天～1 天） ✅ 已交付（tag m4-acceptance）
-- 对照 PRD 验收链路全流程自测：网页→选中→深读→求真→求深→求异→点知识树节点继续探索（6/6 PASS）
-- 边界：过短选区、滚动隐藏、连续深读（storage.onChanged 双通道修复）、Error 态映射
-- 性能：seq 丢弃过期响应（新 Claim 到达时旧响应作废）
-- README/INSTALL 重写为「求真」的交付文档；DEMO.md 演示脚本
-
-### M5 · 加分项（有余力才做） 🟡 部分完成
-- 声明分类路由 ✅（M1 已在 truth prompt 内置：10 类 Claim 分类，观点类提示无需溯源）
-- 求深知识树节点点击→作为新 Claim 重新三连探索 ✅（M4 实现，E2E 验证）
-- 求真证据置信度的"AI 评估非真值"免责说明展示 ✅（footer + 对照块降级文案）
-
-### V1.5 · 系统主动发现 Claim（依据 v1.5_UPGRADE.md） ✅ 已交付（tags u0~u4，tag v1.5 收尾）
-- U0 正文提取与结构化 ✅（extractor.js：章节/段落/句子+offset，nav/footer 过滤，验证 7/7）
-- U1 Claim Detection 管线 ✅（claim-detector.js：三分类+类型子类，缓存，双层验证 PASS）
-- U2 悬浮球状态机 ✅（orb.js：Idle→Analyzing→Ready/Error，隐私：点击才读正文，缓存秒回 329ms）
-- U3 Hover 声明交互 ✅（hover.js：打标+Shadow DOM 提示卡+复用 CAPTURE_SELECTION，验证 5/5）
-- U4 本文概览态 ✅（panel.js：声明/观点统计+列表+已核实徽章+返回入口，验证 7/7）
-- U5 回归验收 ✅（V1 全链路 8 项 + V1.5 链路 5 项 = 13/13 PASS；DEMO/README 更新）
-- 修复：悬浮球入口清空旧 ActiveSelection（本文模式应显示概览而非旧选区，VD3）
-
-### V1.6 · 交互细节优化（2026-08-26 用户反馈） ✅ 已交付（tag v1.6）
-- O1 Hover 提示卡体验 ✅（用户反馈：鼠标从句子移到卡片时卡片已消失，无法点击按钮）
-  - 根因：mouseleave 立即隐藏 + `host.contains` 不穿透 Shadow DOM（卡片内部 hover 被误判为"离开"）
-  - 修复：延迟隐藏 timer 300ms + shadowRoot.contains 卡片保护 + opacity 淡入/淡出动画 + 同句内不跟随定位
-- O2 悬浮球尺寸/位置 ✅（用户反馈：按钮过小）：42px→84px（box-sizing 修正精确尺寸），字号 16→30，徽标同步放大，移至左上角
-- 验证 9/9 PASS：移动途中卡片不消失 / 进入卡片保持显示 / 按钮可点击 / 离开淡出 / orb 84x84 左上角
-
-### 知乎接入 · 凭证到位正式启用（2026-08-26） ✅
-- `zhihu_api.key`（40 chars）配置并生成 generated-config；gen-config 兼容新文件名
-- Node 层真实 API 冒烟 7/7：zhihu_search/global_search 鉴权通过、归一化字段完整、坏凭证 20001 正确拒绝
-- SW 运行时 E2E 4/4：选区深读 → 求真「已核验」徽章 + 8 条知乎来源链接
-- 文档同步（README/DEMO/WORKPLAN）；datasource.js 零改动——M3 可插拔设计直接生效
-
-### 全网搜索接入修复（2026-08-26 用户反馈） ✅
-- 诊断：global_search 接口层本已接通，但 ContentType 只是内容形态枚举（全网结果也是 'Answer'），
-  UI 按 ContentType 标注导致全网条目全部被误标为「知乎回答」——用户看到"没有全网搜索"
-- 修复：datasource 归一化加 origin 字段（zhihu/global）；panel 来源卡按 origin 标注
-  （全网 · 回答/文章/网页 vs 知乎回答/知乎文章），卡片标题分组计数「检索来源（知乎站内 N · 全网 M）」
-- 验证：mock 层 12/12 PASS（origin 标记/端点/去 em/标注分支防回归）；
-  新 key 到位后真实 E2E 7/7 PASS——来源卡「知乎站内 5 · 全网 5」，8 条来源含 3 条全网标注
-- 注：期间遭遇平台 30001 频率限制窗口（无 Retry-After 头），用户更换 key 后恢复
+- [V1 · 交付记录（M0-M4）](#v1--交付记录)
+- [V1.5 · 全文声明扫描（计划 + 交付记录）](#v15--全文声明扫描)
+- [知乎接入与全网搜索修复（插记录）](#知乎接入与全网搜索修复)
+- [V2.0 · 信息溯源系统（计划 + 交付记录）](#v20--信息溯源系统)
+- [V2.5 · 来源评价系统（计划 + 交付记录）](#v25--来源评价系统)
+- [V2.6 · 证据定向与溯源追踪（交付记录）](#v26--证据定向与溯源追踪)
+- [V2.7 · 安全代理（交付记录）](#v27--安全代理)
+- [V2.8 · 登录门禁（升级计划 + 执行记录）](#v28--登录门禁邀请码--jwt)
+- [V2.9 · 检索算法闭环（algorizm_fix 分支）](#v29--检索算法闭环algorizm_fix-分支)
+- [V3.0 · 可视化动态交互（规划 + 执行记录）](#v30--可视化动态交互规划--执行记录)
+- [已知环境问题](#已知环境问题)
+- [遗留事项](#遗留事项)
 
 ---
 
-# V2.0 执行记录
+# V1 · 交付记录
 
-> 计划见上文「V2.0 升级计划」，2026-08-26 获批（TD1-TD4 按建议；TD5=保持 84px 下移一点）。
+> 依据 `D:\Project\知乎黑客松2026\PRD` 全部 10 份文档。2026-08-25 批准并执行完毕。
 
-## 里程碑交付状态 ✅ 全部完成
+## 决策记录
 
-| 里程碑 | 提交 | 内容 | Node 层验证 |
-|---|---|---|---|
-| N0 | `1847d8f` | Claim Detection v2：11 类信息对象识别+验证价值过滤+上下文 Claim | 10/10 |
-| N1 | `fd894ed` | Search Controller：Source Type 分类器+四级白名单+关键词生成+综合评分排序 | 12/12 |
-| N2 | `6375242` | Web Reader：原文抓取+自研轻量正文抽取+失败降级 | 9/9 |
-| N3 | `8da0d29` | 证据验证引擎：逐源判定（存在≠相关≠支持）+五态结论+权威加权 | 8/8 |
-| N4 | `4061860` | 求异真实来源化：挖掘真实对立观点（逐字引用+URL），禁止编造 | 6/6 |
-| N5 | `da7f19c` | 扫描/询问双模式分离：differ 注入真实对立观点 | 4/4 |
-| N6 | `7e79259` | UI：悬浮球拖动/位置记忆/下移(56px) + Claim 定位回网页高亮 | 注入链模拟通过* |
-| N7 | `75b46e2` | 回归+验收+文档+tag v2.0 | 见下 |
-| 修复 | `47a6ef9` | **hover 打标全失效**：N6 patch 误删 wrapClaim 的 `var span` 声明 → ReferenceError 中断全部打标；恢复声明 + activate 单条 try/catch 防御 | 行为级 6/6 + 7/7 |
-
-> 修复验证（hermes-verify-hoverfix/run.js 6/6 + hermes-verify-hover-span-fix/run.js 7/7）：
-> T1 打标 wrapped=2（修复 ReferenceError）/ T3 坏条目跳过好条目仍打标 /
-> T4 deactivate→activate 无残留 / T6 mouseover 监听注册（hover 卡片入口恢复）。
-> 教训：patch 后必须跑**行为级**验证（激活打标循环），只测文件加载会漏掉此类回归。
-
-## 已知环境问题（非代码缺陷）
-
-- **Chrome 151 + --load-extension 的 content script 注入失效**：本自动化测试环境中，
-  开发者模式扩展的 content script 不再注入页面（含最小 hello-world 扩展复现；
-  chrome://extensions 显示已启用无错误；site access 设为"在所有网站上允许"后
-  仅首次导航偶发注入）。注入链模拟执行证明 5 个 content script 无运行时错误。
-  **影响**：E2E 自动化暂不可用。**缓解**：人工加载扩展正常使用（普通启动方式），
-  或降级 Chrome for Testing 版本跑 E2E。
-- 知乎平台 30001 频率限制窗口（无 Retry-After）：Search Controller 串行+缓存已缓解。
-
-## 验收清单对照（升级要求 §13）
-
-- [x] 信息识别：研究报告/文件等 11 类对象识别（N0）；政府/媒体/科研/商业等来源分类（N1）；修辞与情绪过滤（N0 traceable=false）
-- [x] Claim：上下文分析（N0 prev/next/para 注入）；观点背后的可验证信息（§4 prompt 原则）；Claim 定位回原文（N6 scrollToClaimId）
-- [x] 搜索：按 Claim 类型选源（N1 sourceRequirement→查询倾向+优先级）；白名单执行（N1 四级表）；候选排序（N1 综合评分）；Web Reader 读原文（N2）；支持性判定（N3）
-- [x] 结果：可点击 URL（面板来源卡）；五态严格区分（N3 not_needed/no_source/unsupported/partial/supported）；求异真实来源（N4/N5 viewpoint 带 sourceUrl）
-- [x] 回归：知乎 API/联网搜索/选区深读/三 Tab/悬浮球——Node 层全部链路验证通过；浏览器端 E2E 受上述环境问题影响，待人工验收
-
----
-
-# V2.5 升级计划（待审批）
-
-> 依据 `v2.5_UPGRADE.md`。核心目标：**从"找到可靠来源"升级为"系统地发现、识别、比较可靠来源"。**
-> 最终能力：不仅告诉用户"找到了什么"，还告诉用户"为什么这个来源值得相信，以及它是不是原始证据"。
-> 版本演进：V2.0（Claim→搜索→阅读→验证）→ **V2.5（搜索→信源识别→来源评价→独立证据）** → V3.0 预留。
-> 原则：保留 Extension/全文分析/Claim/三问/Web Reader，不推翻已有流程。
-
-## V-0 · 架构解读
-
-### 现状 vs 目标
-| 维度 | V2.0 现状 | V2.5 目标 |
-|---|---|---|
-| 搜索入口 | search-controller 直接生成关键词 | **Query Analyzer** 判问题类型→定策略（关键词/来源类型/时间/**预算**/单双引擎） |
-| 引擎 | 知乎双通道（站内+全网） | 知乎 + **metaso（广泛召回）+ Exa（语义召回）**，按预算选择性调用 |
-| 结果处理 | origin 标注直接进列表 | **URL 规范化+去重管道**（tracking 参数/fragment/http/www/canonical/重定向） |
-| 来源评价 | 四级白名单 + 单一 authority 分 | **Trusted Source Registry**（Verified/Candidate/Restricted，先验非准入）+ 六维分离评分 |
-| 评分指标 | authority 加权混排 | **Authority / Expertise / Relevance / Originality / Evidence / Freshness 六维分离**（权威≠一手） |
-| 职责边界 | 白名单+线性公式 | **LLM 只负责理解来源；Scoring Engine 负责稳定排序** |
-| 证据独立性 | 每条 URL 都算独立证据 | 识别转载关系（A cites B），避免重复转载冒充独立证据 |
-
-### 复用 vs 新增
-- **完全复用**：extractor/orb/hover/content 三 Tab UI、claim-detector v2、web-reader、verify-engine 五态判定、缓存框架、消息总线
-- **改造**：search-controller（并入 Query Analyzer + Registry + Scoring Engine）、datasource（抽象多引擎 provider）、verify-engine（增加独立证据标记）、panel 来源卡展示六维徽章
-- **新增模块**：`query-analyzer.js`（问题类型→策略）、`url-utils.js`（规范化+去重）、`source-registry.js`（可信来源注册表）、`source-analyzer.js`（LLM 来源理解）、`evidence-graph.js`（引用关系）
-
-## V-1 · 里程碑拆分
-
-| # | 内容 | 要点 |
-|---|---|---|
-| M0 | `query-analyzer.js` | LLM 判问题类型（fact/academic/policy/open…）→ 输出策略 JSON：关键词组/优先来源类型/时间窗/预算(1~3 路查询)/是否双引擎。低成本 prompt，带确定性兜底规则 |
-| M1 | `url-utils.js` + datasource 多引擎化 | URL Normalize/Dedup（tracking 清洗、fragment 剥离、协议与 www 归一）；datasource 抽象 provider 接口：zhihu/metaso/exa 各自 isAvailable/search，metaso 与 Exa 凭 `*_api.key` 可选接入，缺哪个降哪个 |
-| M2 | Trusted Source Registry | 从现有四级白名单迁移升级：verified/candidate/restricted 三层 seed 表；未知来源不删除→入候选池获临时评价；Registry 是先验（影响评分分母）不是硬准入 |
-| M3 | source-analyzer.js | LLM 来源理解：输入 URL/标题/摘要→结构化输出来源类型(10 类)/一手二手三级/机构/领域/引用线索；结果按 (query,domain) 缓存 |
-| M4 | evidence-graph.js | 基础转载识别：同文相似度对比+逐字引用段匹配→标记"疑似同一原始来源"；verify-engine 汇总时按证据簇计数而非 URL 数 |
-| M5 | Scoring Engine + verify-engine 改造 | 六维评分（authority/expertise/relevance/originality/evidence/freshness 各 0~100）加权合成排序分；硬过滤先行（不可访问/垃圾/完全不相关）；求真结果附"为什么信这个来源"的一句解释 |
-| M6 | panel 展示升级 | 来源卡显示：五态结论 → 证据 → 来源列表（类型徽章+六维关键项+原始可点击 URL）；区分「无来源」vs「无需验证」（V2.0 已有，回归确认） |
-| M7 | 回归 + 验收 + tag v2.5 | §13 全清单对照；V2.0 全功能回归 |
-
-## V-2 · 技术决策点（需要你确认）
-
-### TQ1. Query Analyzer 的实现方式
-建议：**一次轻量 LLM 调用输出完整策略 JSON**（问题类型+关键词+预算一次返回），带规则兜底（LLM 失败时按 claim.objectType 走静态映射）。备选：纯规则零成本，但灵活性差。
-
-### TQ2. metaso base url 不确定怎么处理
-建议：**实现为 provider 配置项**（gen-config 里 metaso_endpoint 可覆盖，默认用 v2.5 文档中的 playground URL），首次真实调用时验证联通性并允许在 generated-config.js 中修正，不阻塞其他里程碑。备选：现在就花时间调研确定 endpoint。
-
-### TQ3. 双引擎都不配 key 时的行为
-建议：**保留现有知乎双通道作为 fallback**——metaso/exa 是增强不是替代；问题类型=开放研究但双引擎缺席时明示「已降级：仅知乎通道」。备选：无新引擎就拒绝执行深度检索。
-
-### TQ4. Originality/Evidence 维度的判定信号源
-建议：**启发式优先**（发布日期早于转载、含原始数据表/PDF/官方公告特征、被其他候选引用），LLM 分析辅助判断；不追求精确，标注"疑似"即可。备选：全靠 LLM 判断。
-
-### TQ5. 缓存粒度与存储位置
-建议：沿用 chrome.storage.session 会话级缓存，key=(query 哈希)/(domain+path)/(query+domain) 分别缓存 Query/SourceAnalysis/Evidence 判断，跨 Claim 同域免分析。备选：storage.local 持久化（更省配额但要考虑失效策略）。
-
-## V-3 · 风险应对
-
-| 风险 | 应对 |
+| 决策点 | 结论 |
 |---|---|
-| metaso endpoint 未定导致联调空转 | TQ2 方案：配置项+验证脚本先行，M1 完成即测，失败不阻塞 M2-M5 |
-| 新增两引擎后请求量翻倍（知乎已有 30001 限流前科） | 动态预算（M0 输出）+ Query/Domain 双级缓存（TQ5）+ 引擎间串行+退避 |
-| LLM 调用量上升（每 Claim 多一次 analyzer/analyzer 分析） | 同域缓存命中率预期 >60%（新闻类声明高重复）；预算上限：每次求真 ≤4 次 LLM |
-| 六维评分权重拍脑袋 | 初版权重写死+注释依据；面板显示"关键三项"而非全部分数，避免伪精确感 |
-| 证据独立性误判（相似≠转载） | 只标"疑似同一来源"（isSameEvidence=false 默认）；宁可漏判不可错杀 |
+| D1 整页静默采集模块处置 | 方案 A：删除，仓库彻底转向「用户主动选一句」（git 历史可找回） |
+| D2 后端形态 | **方案 B：SW 直连**（无独立后端；Key 放 gitignored 本地配置） |
+| D3 权限模型 | 方案 A：保留 `<all_urls>` content script，主动触发原则即隐私答案 |
+| D4 AI 能力 | 方案 A：DeepSeek 承担三模式分析；知乎直答仅在需要时作证据源 |
 
-## V-4 · 工作量预期
+## 交付内容（全部 ✅）
 
-M0~M7 合计约 **4~6 天**（单引擎联调视 TQ2 进度浮动 ±1 天）：
-- 纯逻辑模块（url-utils/registry/scoring）：各 0.5 天
-- LLM 相关（query-analyzer/source-analyzer/evidence-graph）：各 0.5~1 天
-- 联调与回归：1~1.5 天
-
-## V-5 · 待批清单
-
-**请审批：**
-- [√] V-0 架构解读（复用现有链路，新增 query-analyzer/url-utils/source-registry/source-analyzer/evidence-graph）
-- [√] V-1 里程碑拆分与顺序
-- [√] V-2 五个决策点（TQ1-TQ5 全部按建议）
-- [√] V-3 风险应对
-- [√] V-4 工作量预期
-
-V2.5 批准记录：已批准（2026-08-27），开始执行 M0。
-
-## V2.5 执行记录 ✅ 全部完成
-
-| 里程碑 | 提交 | 内容 | 验证 |
+| 里程碑 | tag | 内容 | 验证 |
 |---|---|---|---|
-| M0 | `db0f30a` | Query Analyzer：六类问题类型→策略 JSON（LLM+规则兜底） | 真实 11/11 |
-| M1 | `d801fdb` | url-utils 规范化去重 + datasource 多引擎（metaso/Exa） | 真实 12/12 |
-| M2 | `2267b68` | Trusted Source Registry 三层先验表（verified/candidate/restricted） | smoke 9/9 |
-| M3 | `9fa5be7` | source-analyzer LLM 来源理解（类型/一手性/机构，(domain+path) 缓存） | 真实 8/8 |
-| M4 | `c2d3bb8` | evidence-graph 转载识别与证据簇（标题+摘要 Dice 双阈值，保守标疑似） | smoke PASS |
-| M5 | `31bb6aa` | Scoring Engine 六维分离评分 + v25-pipeline 全链路编排 | 真实 13/13 |
-| M6 | `433b03e` | panel 溯源展示升级 + truth 模式接入 V2.5 管线 | 真实端到端 6/6 |
-| M7 | 本提交 | 回归+验收+文档+tag v2.5 | 回归全过 |
-
-### 关键实现事实
-- **metaso 真实 API 探明**：`https://metaso.cn/api/v1/search`（响应 webpages[]，字段 link/date/score；
-  文档中 playground 地址实为 HTML 页面）——端点经 metaso_endpoint.txt 可覆盖（TQ2 落地）
-- **TQ3 落地**：metaso/exa 未配置时知乎通道兜底，策略标记 degradedExternal 并在面板明示
-- **§6 分离验证**：官方一手 gov（auth=95 orig=95）vs 媒体转载（auth=70 orig=45）——
-  权威与一手独立计分，转载页同簇 ×0.75 排序降权
-- **§9 独立证据**：GDP 声明 10 条候选 → 按簇计数 independentCount；sameAsOriginal 记录引用关系
-- **§10 展示**：来源卡 = 类型徽章+✓verified+一手/疑似转载标记+whyText 一句话解释；
-  支持程度卡显示「问题类型·候选 N·独立证据 N」
-
-### V2.5 验收清单对照（升级要求 §13）
-- [x] 搜索：Query Analyzer 判类型（B 组真实三例）；metaso/Exa 按策略调用（C/D/E 真实联调）；多源合并；URL 规范化去重（A 组含等价 URL 用例）
-- [x] 来源：Registry 三层工作正常（smoke 9 例）；基本来源类型识别（真实 LLM gov/paper/zhihu 判对）；一手二手区分（originality 三级+置信度）；Authority 与 Originality 分离（A2 断言）
-- [x] 证据：引用关系记录（sameAsOriginal）；重复转载不计独立证据（聚簇×降权）；可点击原始 URL（溯源卡链接）；无来源 vs 无需验证五态互斥（V2.0 延续）
-- [x] 回归：claim-detector v2（N0 11/11）、hover 行为（7/7+11/11）、求深链路（走 V2.0 知乎通道 verification=null 预期）、Web Reader/扩展交互未被触碰
+| M0 选区捕获重构 | `m0-selection-sidepanel` | 选区≥2字符→「深读」按钮；CAPTURE_SELECTION→storage.session→Side Panel | E2E PASS |
+| M1 AI 分析链路 | `m1-ai-analyzer` | ANALYZE 三模式（truth/deep/differ）+ DeepSeek 结构化输出 + 内存缓存 | 真实 API PASS |
+| M2 三 Tab 工作台 | `m2-workbench` | 求真（徽章+证据卡+原文↔来源对照）/求深（原理+知识树）/求异（立场卡）；Liquid Glass 视觉 + 深色模式 | 人工+自动 |
+| M3 知乎开放能力 | `m3-zhihu-pluggable` | datasource 可插拔设计；无凭证降级明示（凭证 08-26 到位即启用，零代码改动） | 降级态 PASS |
+| M4 打磨验收 | `m4-acceptance` | PRD 全流程自测 6/6；seq 丢弃过期响应；Error 态映射 | 6/6 PASS |
+| M5 加分项 | — | 声明分类路由 / 知识树继续探索 / 免责说明展示 | — |
 
 ---
 
-## 五、风险与应对
-
-| 风险 | 应对 |
-|---|---|
-| 知乎 API 凭证拿不到/接口不符 | M3 设计为可插拔数据源；降级为纯 LLM 分析并在 UI 明示 |
-| 直答 Agent 100 次/天太紧 | 只在演示路径用，其余走缓存 |
-| Claim↔Evidence 对照质量差 | prompt 里强制"引用原文片段 vs 来源片段"双槽输出，宁缺毋滥 |
-| 48h 内功能范围过大 | M3/M4 可压缩，M5 全砍；M2 结束就已具备完整可演示闭环 |
-
----
-
-## 六、需要你提供的输入
-
-1. 四个决策点（D1-D4）的结论 //已在原文中答复
-2. 知乎开放平台凭证 + 获取方式（或确认暂无，走降级路线）//已在\zhihu-skill中注明
-3. LLM API Key（沿用 DeepSeek 项目惯例：项目根 api_key.key + .gitignore）//`deepseek_api.key` // 有缺失的先放占位符，再向我申请。
-4. 交付截止时间点（影响 M3/M5 取舍）//自行判断
-
----
-
-## 七、一句话总结
-
-> 现有仓库是"自动采集整页"的旧方向，PRD 是"用户主动选一句"的新方向——M0 先完成这次转向，M1-M2 搭起后端与 Side Panel 形成最小闭环（此时已可演示），M3 接知乎生态、M4 打磨验收，M5 视余力加亮点。
-
-**请审批：**
-- [√] 四个决策点 D1-D4 的选择
-- [√] 里程碑顺序与范围取舍是否认可
-- [√] 提供第六节所列输入
-
-V1 批准记录：已批准并执行完毕（M0-M4 全部交付）。
-
----
-
-# V1.5 升级计划（待审批）
+# V1.5 · 全文声明扫描
 
 > 依据 `v1.5_UPGRADE.md`。核心变化：**从"用户指定 Claim"升级为"系统主动发现 Claim"**。
-> 原则：保留现有「选中一句 → 深读 → 三 Tab」闭环不推翻，新增「全文理解 → 声明识别 → 声明级交互」能力。
+> 原则：保留「选中一句 → 深读 → 三 Tab」闭环不推翻，新增全文理解→声明识别→声明级交互。
+> 2026-08-25 批准（VD1-VD3 按建议），已全部交付。
 
-## V-0 · 升级要点解读（与 V1 的关系）
+## 计划要点
 
-| 维度 | V1（已交付） | V1.5（新增） |
+| 维度 | V1（已有） | V1.5（新增） |
 |---|---|---|
 | Claim 来源 | 用户选中一句 | 系统全文分析主动发现 + 用户选中（并存） |
 | 触发方式 | 选区「深读」按钮 | 新增「求真」悬浮球（Idle→Analyzing→Ready） |
-| AI 调用时机 | 查看即分析 | 全文阶段**只做发现+分类+定位**；用户查看某 Claim 时才走现有三模式链路 |
-| 网页读取 | 只读选区文本 | 用户点击悬浮球后读取正文（一次性、显式授权语义，不做后台监听） |
-| Side Panel | 三 Tab | 新增「本文概览」态（声明统计列表）→ 点击 Claim 进入现有三 Tab |
+| AI 调用时机 | 查看即分析 | 全文阶段只做发现+分类+定位；查看某 Claim 时才走三模式链路 |
+| Side Panel | 三 Tab | 新增「本文概览」态 → 点击 Claim 进入现有三 Tab |
 
-**关键架构判断（复用优先）**：
-- 现有 `analyzer.js` 三模式链路、缓存、`datasource.js`、Side Panel 三 Tab 状态机**全部复用**；
-- 新增的是一条独立管线：正文提取 → 结构化 → 句子切分 → Claim 识别（一次 LLM 调用）→ Claim 索引（storage.session）→ Hover 交互层；
-- V1 的 ActiveSelection 流程原样保留（升级要求 §6：不得删除或破坏）。
+技术判断：analyzer 三模式、缓存、datasource、面板状态机全部复用；新增正文提取→结构化→Claim 识别→Claim Index→Hover 交互的独立管线；红线：全文阶段不验证任何 Claim、不调搜索。
 
-## V-1 · 里程碑
+## 决策记录
 
-### U0 · 正文提取与结构化（content script 侧，纯本地，无 LLM）（半天）
-- 新增 `src/core/content-script/extractor.js`：DOM → 正文提取（main/article 优先，剔除 nav/aside/footer/script）→ 章节（h1-h4 分组）→ 段落 → 句子切分（中英文句边界）
-- 数据模型：`Document{title,url} → Section → Paragraph → Sentence{id, text, sectionPath, charOffset}`（升级要求 §5）
-- 句子级 offset 记录，为 Claim↔网页映射（§2.4）打底
-- 验收：对测试页与一篇真实文章提取出正确结构（章节数/段落数/句子数合理，offset 可回定位）
-- **完成即 git tag**（回退点）
-
-### U1 · Claim Detection 管线（SW 内一次 LLM 调用）（半天～1 天）
-- 新增 `src/core/ai/claim-detector.js`：句子数组 → 一次 DeepSeek 调用 → 每句分类：可验证声明/主观观点/非声明；可验证声明再分：事实/数字/因果/比较/预测/定义/其他
-- 输出即 Claim Index：`{id, text, type, verifiable, sentenceId, position}`（§5 数据模型）
-- prompt 要求：宁缺毋滥（拿不准归为非声明）；批量结构化 JSON 输出 + 现有 extractJson/校验重试机制复用
-- Document Analysis 缓存：`storage.session` 按 url+正文哈希缓存（§7：同一页面重复打开优先读缓存）；SW 内存 Map 加速
-- **明确不做**：全文阶段不验证任何 Claim、不调用知乎搜索（§4/§7/§10）
-- 验收：Node 层直连测试（长文分类结果稳定、JSON 合法）+ 真实 SW 运行时验证
-
-### U2 · 悬浮球 + 状态机（content script）（半天）
-- 新增悬浮球 UI（页面右下角，低干扰半透明，Liquid Glass 风格延续）：Idle（求真 logo）→ Analyzing（旋转+进度语义）→ Ready（声明数徽标）→ Error（可重试）
-- 点击 → `EXTRACT_DOCUMENT`（本地提取）→ 发 SW `DETECT_CLAIMS` → Ready 后存 Claim Index
-- 已分析页面再次点击直接进入 Ready（读缓存，不重复调用 LLM）
-- 不影响原网页阅读：fixed 定位、z-index 控制、不拦截页面事件
-- 验收：悬浮球三状态切换正确；重复点击走缓存（网络面板无第二次 LLM 请求）
-
-### U3 · Hover 声明交互（content script）（1 天）
-- Claim Index 回传 content script 后，按 sentenceId/offset 给对应句子元素打标（`<mark>` 语义或 data 属性 + 轻量下划线样式，**不修改原文文字**，§10）
-- mouseover 委托：Hover 命中 Claim 句 → 轻微高亮 + 浮动提示卡（声明类型徽章 + 原句 + [求真][求深][求异] 三按钮）
-- 非 Claim 文本 Hover：零处理（§2.5）
-- 提示卡按钮 → 复用现有 CAPTURE_SELECTION 消息路径（把该 Claim 文本作为 ActiveSelection payload）→ Side Panel 打开进入三 Tab——**最大化复用，不新建分析入口**
-- 性能：mouseover 用 delegation + rAF 节流；提示卡复用深读按钮的定位/隐藏逻辑
-- 验收：Hover 命中/不命中两分支正确；点击[求真]进入现有求真流程且结果正确
-
-### U4 · Side Panel「本文概览」态（半天）
-- 新增第四状态（在 Empty 与 Claim 工作台之间）：「本文」标题 + 声明统计（🟢充分支持/🟡部分支持/🔴证据不足/⚪主观观点 计数）+ Claim 列表（类型徽章+原句摘要）
-- 统计口径：全文阶段只有分类，没有验证结论——列表初始为「待验证」；用户查看过的 Claim 才显示其求真徽章（复用 state.results）
-- 点击列表项 → 进入现有 Claim 工作台（等价于 Hover 点击）
-- 验收：悬浮球 Ready 后打开面板显示概览；点击 Claim 进入三 Tab 正常
-
-### U5 · 回归 + 验收 + 文档（半天）
-- 回归（升级要求 §9.D）：选中→深读、三 Tab、连续深读、Error 态全部不回退（现有 E2E 脚本直接重跑）
-- 新链路验收（§9.A/B/C）：悬浮球三态、正文提取结构化、Claim 识别三分类、Hover 映射与触发
-- 隐私自查（§8）：仅在点击悬浮球后读取正文；无后台自动分析；无持续监听上传
-- DEMO.md 增补 V1.5 演示段（§11 完成标志的 Demo 流程）；README 更新
-- **完成即 git tag v1.5**
-
-## V-2 · 技术决策点（需要你确认）
-
-### VD1. Claim 识别的 LLM 用量与截断策略
-全文句子可能上百句。建议：**正文截断到前 N 句（N≈120，超出部分提示"仅分析前部"）+ 单次调用**。备选：分批多次调用（慢、贵，但覆盖全）。倾向前者（黑客松演示场景够用）。
-
-### VD2. Hover 高亮的视觉强度
-升级要求只说"轻微高亮"。建议：**虚线下划线 + Hover 时浅色底**，不做整句变色块（避免"改造网页"的观感，贴近 PRD 原则 1）。备选：右侧页边距小圆点标记。
-
-### VD3. 「本文概览」的入口优先级
-悬浮球 Ready 后打开面板：默认显示「本文概览」还是保持现有 Empty/Claim 逻辑？建议：**有 Claim Index 时默认概览态，点 Claim 或重新选中文字后进入工作台**（概览是 V1.5 的门面，演示价值高）。
-
-## V-3 · 风险与应对
-
-| 风险 | 应对 |
+| 决策点 | 结论 |
 |---|---|
-| 正文提取在真实网站质量差（SPA/懒加载/反爬结构） | U0 先在 3~5 个代表性站点人工校验；提取失败时悬浮球 Error 态明示"此页面暂不支持"，不硬塞 |
-| 长文 LLM 分类截断丢失后半文 Claim | VD1 截断策略明示边界；演示选文章长度可控 |
-| Hover 打标与页面自身样式/脚本冲突 | data 属性 + 非侵入样式；Shadow DOM 提示卡隔离；打标前检测元素可改性 |
-| 全文分析被误解为"后台采集"（隐私观感） | 仅点击悬浮球触发 + README/DEMO 明示；悬浮球 Idle 态不读任何内容 |
-| 与现有选区流程互相干扰（按钮/悬浮球同屏） | 视觉分区（右下悬浮球 vs 选区旁按钮）；事件处理独立，互不阻塞 |
+| VD1 LLM 用量与截断 | 正文截断前 ~120 句 + 单次调用 |
+| VD2 Hover 高亮视觉 | 虚线下划线 + Hover 浅色底（不做色块） |
+| VD3 概览入口优先级 | 有 Claim Index 时默认概览态 |
 
-## V-4 · 工作量与顺序
+## 交付内容（全部 ✅，tags u0~u4、v1.5）
 
-U0 → U1 → U2 → U3 → U4 → U5，总计约 **3～4 天**。U0/U1 完成即有内部可验证产物；U2 结束可演示"点击悬浮球→发现声明列表"；U3 是体验核心；U4/U5 收尾。若时间紧：U4 可并入 U3 简化（概览只做统计行），U3 的 Hover 提示卡可先只做「求真」单按钮。
-
-## V-5 · 需要你提供的输入
-
-1. VD1-VD3 三个决策点的选择（或"按建议"）//按建议
-2. 无新增外部依赖（仍只用 DeepSeek key；知乎凭证到位与否不影响 V1.5）
-
-**请审批：**
-- [√] V-0 架构判断（复用现有链路，新增独立 Claim 管线）
-- [√] V-1 里程碑拆分与顺序
-- [√] V-2 三个决策点
-- [√] V-3 风险应对是否认可
-
-批准后我从 U0 开始执行。
+| 里程碑 | tag | 内容 | 验证 |
+|---|---|---|---|
+| U0 正文提取结构化 | `u0-extractor` | extractor.js：章节/段落/句子+offset，nav/footer 过滤 | 7/7 |
+| U1 Claim Detection | `u1-claim-detector` | claim-detector.js：三分类+类型子类，storage.session 缓存（秒回 329ms） | 双层 PASS |
+| U2 悬浮球状态机 | `u2-orb` | orb.js：Idle→Analyzing→Ready/Error，点击才读正文 | — |
+| U3 Hover 声明交互 | `u3-hover` | hover.js：打标+Shadow DOM 提示卡+复用 CAPTURE_SELECTION | 5/5 |
+| U4 本文概览态 | `u4-overview` | panel.js：声明/观点统计+列表+已核实徽章+返回入口 | 7/7 |
+| U5 回归验收 | `v1.5` | V1 全链路 8 项 + V1.5 链路 5 项 = 13/13 PASS；文档更新 | 13/13 |
 
 ---
 
-# V2.0 升级计划（待审批）
+# 知乎接入与全网搜索修复
 
-> 依据 `v2.0_UPGRADE.md`。核心变化：**从「AI 判断文本是否需要验证」升级为「信息对象识别 → 信源发现 → 证据验证」的信息溯源系统。**
-> 产品定位随之升级：不是"AI 帮你判断真假"，而是"AI 帮你从信息中找到可追溯的证据"。
-> 原则：保留现有 Chrome Extension、悬浮球、全文扫描、Side Panel、求真/求深/求异及搜索能力，不推翻已有产品闭环。
+## 知乎接入 · 凭证到位正式启用（2026-08-26）✅
 
-## T-0 · 升级要点解读（与 V1.6 的关系）
+- `zhihu_api.key`（40 chars）配置并生成 generated-config；gen-config 兼容新文件名
+- Node 层真实 API 冒烟 7/7：鉴权通过、归一化完整、坏凭证 20001 正确拒绝
+- SW 运行时 E2E 4/4：求真「已核验」徽章 + 来源链接；datasource 零改动（M3 可插拔设计直接生效）
 
-| 维度 | V1.6（已交付） | V2.0（新增） |
+## 全网搜索接入修复（2026-08-26 用户反馈）✅
+
+- 诊断：global_search 接口层本已接通，但 ContentType 只是内容形态枚举（全网结果也是 Answer），
+  UI 按 ContentType 标注导致全网条目全部被误标「知乎回答」
+- 修复：datasource 归一化加 `origin` 字段（zhihu/global）；panel 来源卡按 origin 标注与分组计数
+- 验证：mock 12/12 + 真实 E2E 7/7（「知乎站内 5 · 全网 5」）；期间遭遇 30001 限流窗口（用户换 key 后恢复）
+
+---
+
+# V2.0 · 信息溯源系统
+
+> 依据 `v2.0_UPGRADE.md`。核心变化：**从「AI 判断真假」升级为「信息对象识别 → 信源发现 → 证据验证」的溯源系统**。
+> 产品定位：不是"AI 帮你判断真假"，而是"AI 帮你从信息中找到可追溯的证据"。
+> 2026-08-26 批准（TD1-TD4 按建议；TD5=悬浮球保持 84px 下移一点），已全部交付。
+
+## 计划要点
+
+| 维度 | V1.6（已有） | V2.0（新增） |
 |---|---|---|
-| 分析起点 | 判断句子"主观/客观" | 先识别**信息对象**（研究报告/数据/政府文件/媒体/观点/修辞…），对象决定处理方式 |
-| Claim | 单句孤立判断 | 句子+前后文+段落+章节联合判断；数据模型加 `context/objectType/sourceRequirement` |
-| 搜索 | query 直接丢给 searchBoth | **Search Controller**：声明→所需来源类型→关键词→白名单→优先级→API |
-| 来源 | 搜索返回即用 | 统一 Source Type 分类（11 类）+ 权威性/相关性/时间/**原始程度**排序 |
-| 验证 | AI 单次生成结论（snippet 注入） | **Web Reader 读原文** → 判断支持性 → 提取具体证据；严格区分 存在≠相关≠支持 |
-| 结论状态 | 支持/较充分/不足等模糊分级 | **五态严格互斥**：无需验证 / 未找到可靠来源 / 不支持 / 部分支持 / 支持 |
-| 求异 | AI 自拟三派立场卡 ❌ | 必须搜真实不同立场资料→读原文→提取观点+URL；找不到就明说，**禁止编造** |
-| 双模式 | 扫描/询问共用判断逻辑 | 自动扫描重"可追溯信息"、过滤观点修辞；主动询问才做深入语义判断 |
+| 分析起点 | 主观/客观二分 | 信息对象识别（11 类）决定处理方式 |
+| Claim | 单句孤立判断 | 句子+上下文联合判断；数据模型加 context/objectType/sourceRequirement |
+| 搜索 | query 直接丢给 searchBoth | Search Controller：来源类型→关键词→白名单→优先级 |
+| 验证 | AI 单次生成 | Web Reader 读原文 → 逐源判定；存在≠相关≠支持 |
+| 结论 | 模糊分级 | **五态严格互斥**；求异禁止编造立场 |
 
-**关键架构判断（复用优先）**：
-- `extractor.js`（结构化+offset）、`datasource.js`（zhihu/global 双通道）、Side Panel 三 Tab 状态机、Hover 层、缓存机制**全部复用**；
-- 新增四块：①claim-detector v2（对象识别+上下文 Claim）②`search-controller.js`（白名单/优先级/关键词）③`web-reader.js`（原文抓取+正文抽取）④验证引擎（五态结论+来源排序 prompt）；
-- 求真是改造最大的一环：从"一次 LLM 生成"变为"检索→排序→读原文→逐源判定"的多步管线；
-- 红线延续：仅用户触发、不做后台监听、不改网页原文。
+架构判断：extractor/datasource/三 Tab/Hover/缓存全部复用；新增 claim-detector v2、search-controller、web-reader、验证引擎四块；求真从"一次生成"变为"检索→排序→读原文→逐源判定"多步管线。
 
-## T-1 · 里程碑
+## 决策记录
 
-### N0 · Claim Detection v2：信息对象识别 + 上下文 Claim（1 天）
-- claim-detector 改造：输出从「三分类」升级为「信息对象识别（11 类）+ 验证价值判断（有溯源价值/无）+ 核心 Claim 提取」
-- Claim 上下文化：当前句 ± 前后句 + 所属段落注入 prompt；数据模型补 `context / objectType / sourceRequirement`
-- 过滤规则落地：夸张修辞、情绪表达、无事实意义数字 → 不进 Claim Index（扫描模式不展示普通观点）
-- 缓存 key 升级（含 prompt 版本号，避免旧缓存污染）；Node 层直连验证 + SW 运行时验证
+| 决策点 | 结论 |
+|---|---|
+| TD1 正文抽取 | 自研轻量抽取（零依赖） |
+| TD2 来源分类 | 域名规则优先 + LLM 兜底 |
+| TD3 白名单形态 | 内置默认四级表，不做设置 UI |
+| TD4 扫描是否自动溯源 | 扫描=发现+分类+定位，溯源由点击触发 |
+| TD5 悬浮球尺寸 | 保持 84px，位置下移一点 |
 
-### N1 · Search Controller + Source Type 分类器（1～1.5 天）
-- 新增 `src/core/ai/search-controller.js`：Claim(+sourceRequirement) → 所需来源类型 → 关键词生成（主查询+补充查询）→ 白名单过滤 → 优先级排序 → 调 datasource（zhihu_search/global_search）
-- Source Type 统一分类：11 类枚举（政府机构/科研机构/学术论文/官方组织/权威媒体/专业媒体/商业机构/证券机构/企业官方来源/知乎/其他）
-- 来源白名单：四级（优先/允许/低优先级/禁止），V2.0 内置默认表（域名规则种子），预留 storage 覆盖
-- 分类策略：域名规则优先（gov/edu/arxiv/知名机构表），不确定的走 LLM 批量兜底（省配额）
-- 验收：给定典型 Claim（如"某证券报告称 X"），Controller 能产出正确类型的候选来源列表
+## 交付内容（全部 ✅，tag v2.0 含 hover 修复 47a6ef9）
 
-### N2 · Web Reader + 来源排序（1～1.5 天）
-- 新增 `src/core/content-script/../ai/web-reader.js`（SW 侧）：URL → fetch 原文（扩展已有 `<all_urls>` host permission）→ HTML 转正文文本（轻量抽取：去 nav/script/style，取主体块）→ 截断注入
-- 失败降级：反爬/超时 → 明示「未能读取原文」，退回 snippet 级判断并在结果中标注（诚实原则）
-- 来源排序：DeepSeek 对候选做综合评分（来源类型+机构权威性+与 Claim 相关性+时间+原始程度），**优先原始来源而非搜索排名**
-- Top-N 截断（N≈3）控制后续读原文成本
-- 验收：对真实 URL 完成抓取→抽取→排序；不可达 URL 正确降级
+| 里程碑 | 提交 | 内容 | 验证 |
+|---|---|---|---|
+| N0 Claim Detection v2 | `1847d8f` | 11 类对象识别+验证价值过滤+上下文 Claim | 10/10 |
+| N1 Search Controller | `fd894ed` | Source Type 分类器+四级白名单+评分排序 | 12/12 |
+| N2 Web Reader | `6375242` | 原文抓取+轻量正文抽取+失败降级 | 9/9 |
+| N3 验证引擎 | `8da0d29` | 逐源判定（存在≠相关≠支持）+五态结论 | 8/8 |
+| N4 求异真实来源化 | `4061860` | 挖掘真实对立观点（逐字引用+URL），禁止编造 | 6/6 |
+| N5 双模式分离 | `da7f19c` | differ 注入真实对立观点 | 4/4 |
+| N6 UI 改造 | `7e79259` | 悬浮球拖动/位置记忆/下移 + Claim 定位回网页 | 注入链模拟通过 |
+| N7 回归验收 | `75b46e2` | 回归+文档+tag v2.0 | §13 全对照 |
+| 修复 hover 失效 | `47a6ef9` | **wrapClaim 的 var span 声明被 N6 patch 误删** → 首条 Claim 抛 ReferenceError 中断全部打标；恢复声明 + activate 单条 try/catch 防御 | 行为级 6/6+7/7 |
 
-### N3 · 证据验证引擎 + 求真改造（1～1.5 天）
-- 逐源判定：原文内容 + Claim → 是否支持 + 具体证据引用（区分：存在≠相关≠支持）
-- 五态结论严格落库：`not_needed / no_source / unsupported / partial / supported`（不得混用）
-- 最终结果结构：{结论, 证据[], 原始URL[], 来源类型[]}；多源综合（多数/权威加权）
-- panel 求真 Tab 渲染改造：五态徽章 + 证据卡（引用片段+出处链接）+ 来源可信度展示；所有来源 URL 可点击
-- 验收：构造 支持/部分支持/不支持 三类真实案例各一，端到端结论正确
+> 教训：patch 后必须跑**行为级**验证（激活打标循环），只测文件加载会漏掉此类回归。
+> 执行记录时期的 ad-hoc 验证脚本在 Temp `hermes-verify-n0/n6/hoverfix/hover-span-fix`，可复跑。
 
-### N4 · 求异真实来源化（半天～1 天）
-- 移除 AI 自拟立场卡：改为 搜不同立场资料 → Web Reader 读取 → 提取真实观点（观点+来源 URL+核心依据）
-- 找不到可靠不同观点 → 明确空态文案「暂未找到可靠的不同观点」（禁止编造兜底）
-- 验收：争议性 Claim 出带 URL 的对立观点；非争议 Claim 出诚实空态
+---
 
-### N5 · 扫描/询问双模式分离（半天）
-- 自动扫描（悬浮球）：只做发现+对象分类+定位（维持"不批量验证"红线），列表偏重可追溯信息
-- 主动询问（选中/Hover 点击）：完整语义判断 + 溯源链路
-- 两条 prompt 分开维护，不复用同一判断逻辑
+# V2.5 · 来源评价系统
 
-### N6 · UI/UX：悬浮球 + Claim 定位（半天）
-- 悬浮球：自由拖动 + 限制视口内 + storage 记忆位置 + 缩小尺寸/降阴影/调透明度（降视觉侵入）
-- Claim ↔ 网页定位闭环：面板点 Claim → scrollIntoView + 高亮对应句段（复用 hover 标记层）
-- 概览态适配新数据模型（objectType 徽章、验证价值筛选开关）
+> 依据 `v2.5_UPGRADE.md`。核心目标：**从"找到可靠来源"升级为"系统地发现、识别、比较可靠来源"**——
+> 不仅告诉用户"找到了什么"，还告诉用户"为什么这个来源值得相信，以及它是不是原始证据"。
+> 2026-08-27 批准（TQ1-TQ5 全部按建议），已全部交付。
 
-### N7 · 回归 + 验收 + 文档（半天）
-- 回归（§13）：知乎 API、联网搜索、选区深读、三 Tab、悬浮球全部不回退（现有 E2E 重跑 + 补新断言）
-- 验收清单（§13）逐项核对；DEMO 按 §14 完成标志重写；README 更新
-- **完成即 git tag v2.0**
+## 计划要点
 
-## T-2 · 技术决策点（需要你确认）
+| 维度 | V2.0（已有） | V2.5（新增） |
+|---|---|---|
+| 搜索入口 | search-controller 直接生成关键词 | **Query Analyzer** 判问题类型→定策略（关键词/来源类型/时间窗/预算/单双引擎） |
+| 引擎 | 知乎双通道 | 知乎 + **metaso（广泛召回）+ Exa（语义召回）**，按预算选择性调用 |
+| 结果处理 | origin 标注直接进列表 | **URL 规范化+去重管道** |
+| 来源评价 | 四级白名单 + 单一 authority 分 | **Trusted Source Registry** 三层先验 + 多维分离评分 |
+| 职责边界 | 白名单+线性公式 | **LLM 只负责理解来源；Scoring Engine 负责稳定排序** |
+| 证据独立性 | 每条 URL 都算独立证据 | 识别转载关系，重复转载不冒充独立证据 |
 
-### TD1. Web Reader 正文抽取的实现方式 ✅ 按建议：自研轻量抽取
-### TD2. 来源类型分类的策略 ✅ 按建议：域名规则优先 + LLM 兜底
-### TD3. 来源白名单的配置形态 ✅ 按建议：内置默认四级白名单，不做设置 UI
-### TD4. 自动扫描是否自动溯源 ✅ 按建议：扫描=发现+分类+定位，溯源由点击触发
-### TD5. 悬浮球尺寸 ✅ 用户拍板：**保持 84px 不缩小，位置下移一点**（N6 执行）
+新增模块：query-analyzer / url-utils / source-registry / source-analyzer / evidence-graph。
 
-## T-3 · 风险与应对
+## 决策记录
+
+| 决策点 | 结论 |
+|---|---|
+| TQ1 Query Analyzer 实现 | 一次轻量 LLM 调用输出策略 JSON + 规则兜底 |
+| TQ2 metaso endpoint 不确定 | 实现为可配置端点（metaso_endpoint.txt 覆盖），不阻塞其他里程碑 |
+| TQ3 双引擎缺席时行为 | 知乎双通道兜底，明示降级 |
+| TQ4 一手性判定信号 | 启发式优先 + LLM 辅助，只标"疑似" |
+| TQ5 缓存粒度 | session 级按 Query/Domain 双键缓存 |
+
+## 交付内容（全部 ✅，tag v2.5 含枚举混用修复 86f37bf）
+
+| 里程碑 | 提交 | 内容 | 验证 |
+|---|---|---|---|
+| M0 Query Analyzer | `db0f30a` | 六类问题类型→策略 JSON（LLM+规则兜底） | 真实 11/11 |
+| M1 URL/多引擎 | `d801fdb` | url-utils 规范化去重 + datasource 多引擎化 | 真实 12/12 |
+| M2 Source Registry | `2267b68` | verified/candidate/restricted 三层先验表 | smoke 9/9 |
+| M3 来源分析 | `9fa5be7` | LLM 来源理解（类型/一手性/机构，domain 缓存） | 真实 8/8 |
+| M4 证据聚簇 | `c2d3bb8` | 转载识别（Dice 双阈值，保守标疑似） | smoke PASS |
+| M5 评分+管线 | `31bb6aa` | 六维评分 + v25-pipeline 全链路编排 | 真实 13/13 |
+| M6 面板升级 | `433b03e` | 溯源展示 + truth 模式接入 V2.5 管线 | 真实端到端 6/6 |
+| M7 回归验收 | `da293b0` | 回归+文档+tag v2.5 | 回归全过 |
+| 修复枚举混用 | `86f37bf` | **truth 模式来源全误判知乎**：__sourceRequirement（claim-detector 枚举）被误当 objectType 传管线 → media 查表失败回落 fact → 单路知乎；新增 REQUIREMENT_TO_TYPE 独立映射 + fact 策略放宽多引擎 | 修复验证 10/10+13/13 |
+
+> 关键实现事实：metaso 真实 API 探明为 `https://metaso.cn/api/v1/search`（文档中 playground 地址实为 HTML 页面）；
+> 执行记录时期的 ad-hoc 验证脚本在 Temp `hermes-verify-v25m0/m1/m3/m5/m6/v25final`，可复跑。
+
+---
+
+# V2.6 · 证据定向与溯源追踪
+
+> 依据 `search_advise.md` 与 `upgrade.md`（人工三轮改造，2026-08-27 单日完成，合并 PR #2 `b578762`，tag v2.6）。
+> 核心目标：**先确定找什么证据再搜索（Evidence Targeting）、追到证据真正来自哪里（Provenance Tracing）、结论必须被证据绑定（Evidence Binding）**。
+
+## 交付内容（三轮全部落地）
+
+### 轮次 A：检索系统改造（search_advise.md）
+
+- **取消硬路由**：所有问题类型 = Exa + Metaso 双核普遍召回 + 知乎低配额补充；questionType 只影响各引擎预算配额（ENGINE_BUDGET 表，如 fact: Exa4/Metaso4/Zhihu1）
+- query-analyzer：ENTITY_OFFICIAL_DOMAINS 表（约 36 实体，模型不猜域名）、detectEntities/detectScopeLevel、keywordsEn 跨语言 Query、buildQueries 三路输出（zh/en/official）
+- datasource：metaso 支持 site:域、Exa 走原生 includeDomains、buildEngineQuery 引擎各自处理约束
+- source-analyzer：新增 publisher/identityType（14 类发布主体身份）——**按"谁发布的"判类型，不按内容**；微信公众号守卫（学会/协会不得判 government）
+- source-registry：verified 扩充（stats/npc/court/nih/nasa/fda 等）；微信公众号与微博降为 candidate
+- scoring-engine：六维 → **八维**（+directness 0.15 直答度 / +entity 0.12 主体匹配 / +scope 0.08 地域 / +temporal 0.06 时间；authority 降至 0.25、relevance 0.20）；preferredSources 真正生效 +8、目标论文 +6、转载 -6
+- evidence-graph：转载检测三级分级（duplicate/likely_syndication/possible_syndication），防改标题转载漏判
+- verify-engine：selectDiverseTopN 多样性验证池（同来源类型最多占一半）
+- analyzer：truth 提示词强制证据绑定（evidenceId 引用 E1~E5）+ 硬降级校验（无来源→insufficient；未绑定编号→partial）
+
+### 轮次 B：Evidence Targeting & Provenance Tracing（upgrade.md）
+
+- **evidence-target.js**（新增，搜索前决策 P0）：显式来源提取（URL/DOI/arXiv/PMID，纯规则）→ Claim 11 类 → Evidence Target 9 类 → Search Strategy 6 类 → Entity 解析（匿名人物 AMBIGUOUS 禁止强行绑定）+ buildBinding 6 项硬校验
+- **academic.js**（新增，P0/P2）：论文目标验证——DOI 精确 > arXiv/PMID > 显式 URL 直中 > 标题精确 > 近似(dice≥0.85) → TARGET_PAPER；语义相似只能 RELATED_PAPER（禁止冒充）
+- **provenance.js**（新增，P1）：「据X报道/转载自/according to」上游线索提取 → 共同上游检测（SHARED_UPSTREAM/INDEPENDENT/DERIVED）→ 受控上游检索（3+3+3 预算）→ 置信分级（LOW 不得称首发）
+- v25-pipeline：新主流程（并行 策略/目标/页面抓取 → buildPlan 显式步最优先 → … → Binding）；verify-engine 同 provenance 簇只留 1 代表、复用已读正文；panel 元信息行展示 绑定:BOUND/UNBOUND、主体歧义、硬校验、独立来源数
+
+### 轮次 C：知乎超链接论文引用修复（实测问题）
+
+- 问题：知乎文章里 `<a href>` 形式的论文引用无法被提取（htmlToText 丢弃 href），模型返回"其它论文"
+- 修复：web-reader 新增 extractLinks（剥离标签前提取锚点）+ wantHtml 选项；evidence-target 新增 classifyLink/extractExplicitSourcesFromHtml（锚文本即标题线索，过滤导航噪声）/mergeExplicitSources；v25-pipeline 新增 fetchPageContext（与 LLM 并行抓取当前文章页，10 条/10 分钟缓存）；academic 新增 EXPLICIT_URL 直中判定
+- 修复后链路：页面 `<a href="doi.org/…">论文标题</a>` → 显式步最先直读 → DOI 命中 → TARGET_PAPER 徽章+评分加分 → 硬校验通过
+
+## 验证
+
+- 回归冒烟：`node scripts/smoke-search-advise.js` → **15 组 45 项断言全部通过**（覆盖实体识别/地域/跨语言/双核计划/八维排序/转载分级/多样性池/匿名人物/论文验证/共同上游/显式 DOI 步/超链接回归）
+- 语法校验：node --check 全部通过（16 文件）
+- 浏览器端到端与真实 API 联调：待人工实测（见遗留）
+
+## 行为变化示例
+
+| 场景 | V2.5 | V2.6 |
+|---|---|---|
+| NASA 类问题 | fact 排除 Exa，官方源召回不到 | 双核+英文 Query+site:nasa.gov 定向 |
+| 全国人口 vs 县级 | 县级报告可能顶替 | scope 维度重罚 |
+| 公众号"健康管理学会" | 可能误判为政府 | 按发布主体判 → org |
+| 匿名人物"朱女士" | 只搜名字、可能强行绑定 | PERSON_EVENT+AMBIGUOUS，禁止断言 |
+| 论文引用 | 语义搜索可能把"相关论文"当目标 | 超链接/DOI 直读，TARGET/RELATED 严格区分 |
+| 多家媒体转同一通讯社 | 按独立证据计数 | 共同上游检测 → 同簇只留代表 |
+
+---
+
+# V2.7 · 安全代理
+
+> 依据 `docs/v2.7_UPGRADE.md`（人工改造，2026-08-29~30 两天，提交 `55613f0` + `b49a72b`）。
+> 核心目标：**密钥仅存于云端、扩展零密钥**的安全可移植形态——引入 Cloudflare Workers 透明代理，
+> 分发包不含任何第三方 API 密钥，扩展仅持一个可随时撤销/轮换的访问令牌。
+> 代理源码独立于扩展仓库：`D:\code\2026zhihu_hackathon\qiuzhen-proxy\`（worker.js + wrangler.toml，非 git 仓库）。
+
+## 计划要点（架构变化）
+
+```text
+改造前（V2.6）：扩展 SW ──直连──▶ DeepSeek/知乎/metaso/Exa
+               generated-config.js 硬编码全部密钥（解压即读走，无法撤销/限流）
+改造后（V2.7）：扩展 SW ──HTTPS──▶ CF Worker (api.anota.best) ──▶ 各第三方
+               仅持访问令牌          真实密钥存 Worker Secrets（永不下发前端）
+```
+
+| 维度 | V2.6（已有） | V2.7（新增） |
+|---|---|---|
+| 密钥位置 | generated-config.js 明文硬编码，随扩展包分发 | 仅存于 Cloudflare Worker Secrets |
+| 请求路径 | 扩展 → 直连第三方 | 扩展 → CF Worker（认证+注入密钥）→ 第三方 |
+| 响应结构 | 第三方原始响应 | **不变**（透明代理）——下游归一化/评分/验证零改动 |
+| 可用性判断 | 检查本地密钥 | `isProxy() \|\| 本地密钥存在` |
+| 分发可行性 | 不可分发 | 可安全分发（零密钥 + 令牌可撤销） |
+| 回退 | — | 删除 proxy_base.txt → 重跑 gen-config → DIRECT 模式 |
+
+## 决策记录
+
+| 决策点 | 结论 |
+|---|---|
+| 代理形态 | **透明代理**（响应结构与原样一致）——smoke 45 项断言直接当回归网 |
+| 认证机制 | 阶段 A 静态 `ACCESS_TOKEN`；阶段 3 换知乎 OAuth JWT（→ v2.8） |
+| 密钥存储 | Cloudflare Workers Secrets（wrangler secret put，共 5 个：DEEPSEEK/ZHIHU/METASO/EXA/ACCESS_TOKENS） |
+| 域名 | `anota.best`，子域 `api.anota.best`（TLS + OAuth redirect_uri 前提） |
+| 回退机制 | 保留 DIRECT 模式（本地密钥，开发后门） |
+
+## 交付内容（三阶段全部落地）
+
+### 阶段 A：CF Workers 透明代理（新增 2 文件，部署于 Cloudflare 非扩展包内）
+
+- `qiuzhen-proxy/worker.js`（88 行）：CORS/透明转发/令牌校验；路由表：
+  `POST /v1/chat/completions`（DeepSeek 透传）/ `GET /api/v1/content/{zhihu_search,global_search}`（知乎，Worker 重新生成 X-Request-Timestamp）/ `POST /metaso/search` / `POST /exa/search` / `GET /health`
+- `qiuzhen-proxy/wrangler.toml`：部署配置（routes = api.anota.best/*）
+
+### 阶段 B：配置生成器双模式（`55613f0`）
+
+- `scripts/gen-config.js` 重写：**PROXY**（存在 proxy_base.txt → 密钥全置 null，仅含 PROXY_ENABLED/BASE_URL/ACCESS_TOKEN）vs **DIRECT**（原逻辑）
+- 新增输入文件（gitignored）：`proxy_base.txt`（https://api.anota.best）、`proxy_token.txt`（openssl rand -hex 32）
+
+### 阶段 C：扩展端全模块代理适配（`b49a72b`）
+
+- 7 个直连模块统一"三件套"（isProxy / isLlmAvailable / llmRequestParts），每文件固定 3 处改动（辅助函数 + fetch 地址/认证头 + 可用性校验）：
+  `datasource.js`（知乎/metaso/Exa 三数据源分别处理）、`analyzer.js`、`claim-detector.js`、`query-analyzer.js`、`source-analyzer.js`、`verify-engine.js`、`evidence-target.js`
+- 零改动确认（架构判断不调 DeepSeek）：v25-pipeline / provenance / academic / search-controller / web-reader / background / url-utils / source-registry / evidence-graph / scoring-engine / manifest / sidepanel / content-script
+
+## 验证
+
+- 回归冒烟：`node scripts/smoke-search-advise.js` → **45/45 PASS**
+- 语法校验：7 个改动文件 node --check 全过
+- 零密钥确认：`grep -cE "sk-ca0c|mk-6DCB|e673c367|64e12d23" src/core/generated-config.js` → **0**
+- 当前环境：generated-config.js 为 PROXY 模式（https://api.anota.best，零密钥）
+- 浏览器端到端与 Worker 联调：待人工实测（见遗留）
+
+---
+
+# V2.8 · 登录门禁（邀请码 + JWT）
+
+> 依据 `docs/v2.7_UPGRADE.md` §7 阶段 3（未实施）与知乎官方文档结论（2026-08-31 复核）。
+> 核心目标：**用「邀请码 + 短期 JWT」替代静态 `ACCESS_TOKEN`**——分发后任何受邀用户凭邀请码自助接入，
+> 不再需要运营者手工发放令牌；JWT 可过期/刷新/按用户撤销。
+> **方向调整记录**：原方案为知乎 OAuth 登录；阅读知乎官方文档（`docs/zhihu_OAuth_OFFICAL.md`，gitignored 不入库）确认——
+> 知乎 OAuth 面向「三方登录 + 获取授权用户个人信息」，与"仅作为登录门槛"的需求不匹配（申请需人工邮件审批、
+> 授权范围是邮箱/手机/公开内容、access_token 仅 1h 有效且无 refresh_token），故改用邀请码 + JWT。
+> **（本计划待审批）**
+
+## O-0 · 架构解读
+
+### 现状 vs 目标
+
+| 维度 | V2.7（已有） | V2.8（新增） |
+|---|---|---|
+| 认证 | 静态 ACCESS_TOKEN（运营者手工发放，泄露难察觉） | 邀请码兑换 → Worker 签发短期 JWT（可过期/刷新/按用户撤销） |
+| 用户门槛 | 谁拿到令牌谁用 | 受邀用户凭邀请码自助接入（邀请码一次性、可批量生成/吊销） |
+| Worker 鉴权 | `isValidUserToken` 查逗号分隔表 | JWT 校验（签名 + exp + sub 用户维度）；静态表保留为 fallback（开发期） |
+| 扩展体验 | 无登录概念，配置文件中放 token | 面板登录输入框 + 登录态展示 + 过期自动引导重登 |
+
+### 复用 vs 新增
+
+- **完全复用**：透明代理路由、7 模块三件套、gen-config PROXY 模式、整个溯源管线
+- **改造**：worker.js（新增 `/auth/redeem` 邀请码兑换 + JWT 签发/校验）、panel（登录 UI）、datasource 可用性判断（代理模式下需有效 JWT）
+- **新增**：`src/core/auth/invite-jwt.js`（扩展端兑换+存储封装）、Worker 端 JWT 工具（HS256，`JWT_SECRET` 走 Secrets）
+
+## O-1 · 里程碑
+
+| # | 内容 | 要点 |
+|---|---|---|
+| O0 | 门禁方案确认 | 确定邀请码+JWT（本文档已按此方向）；生成/吊销邀请码的运营端方式（wrangler secret 或 KV 存 active codes） |
+| O1 | Worker 兑换+签发 | `POST /auth/redeem`（邀请码 → 校验 → 签发 JWT{sub:邀请码别名, exp}）；`JWT_SECRET` 入 Secrets；静态 ACCESS_TOKENS 保留为 fallback |
+| O2 | Worker JWT 鉴权 | `isValidUserToken` 优先 JWT（HS256 签名 + exp + iss/aud），其次静态表 |
+| O3 | 扩展登录流 | panel 登录区（输入邀请码 → POST /auth/redeem → JWT 存 `storage.local`）；未登录/过期态 → 引导登录（仅代理功能需登录，DIRECT 模式不受影响） |
+| O4 | 用户维度落地 | 请求带 JWT；Worker 按 sub 做基础限流/用量（可选）；知乎搜索 API 仍用应用级 Access Secret（身份门槛与数据凭证分离） |
+| O5 | 回归 + 验收 + tag v2.8 | smoke 45/45 + 邀请码流程人工实测 + 文档更新 |
+
+## O-2 · 技术决策点（需要你确认）
+
+### OQ1. 门禁方案（已按方向调整）
+建议：**邀请码 + JWT**（本次已选定）。理由：知乎 OAuth 面向三方登录与用户个人信息获取，与"仅作登录门槛"不匹配（详见方向调整记录）。若未来需要"知乎账号直接登录"或"读取用户知乎数据"，再回到 OAuth 申请流程。
+### OQ2. JWT 有效期与刷新
+建议：**短期 JWT（24h）+ refresh token（30d）**，过期静默刷新，失败才引导重新输入邀请码。备选：长效 JWT（实现最简单，但泄露风险窗口大）。
+### OQ3. 登录 UI 形态
+建议：panel 顶部状态条（未登录 → 「输入邀请码」入口；已登录 → 用户别名 + 退出）。备选：首次使用自动弹窗强制登录（体验重）。
+### OQ4. token 存储位置
+建议：`chrome.storage.local`（持久，重启免重登）。备选：storage.session（更安全但每次启动重登，体验差）。
+### OQ5. 邀请码管理/限流
+建议：V2.8 用 `INVITE_CODES`（Secrets 逗号分隔或 KV）一次性兑换；Worker 按 sub 做基础请求计数（免费计划内存计数即可）。备选：KV 持久化限流（需另开 KV 绑定）。
+
+## O-3 · 风险与应对
 
 | 风险 | 应对 |
 |---|---|
-| Web Reader 被反爬/登录墙拦截 | 失败明示降级为 snippet 判断并标注；演示选可抓取站点 |
-| 配额消耗激增（每 Claim 多次 LLM+抓取） | 按需触发（TD4）+ 排序后 Top-N 截断 + 全链路缓存复用 |
-| 30001 频率限制窗口 | Search Controller 内置节流队列 + 失败退避；演示前预热缓存 |
-| 溯源链路延迟长（多步串行） | 分步进度 UI（检索中→读取原文→比对证据）；单步超时上限 |
-| 求异常见"找不到不同观点" | 诚实空态即产品行为（升级要求明示），不算缺陷 |
-| 改造范围大、周期长 | 里程碑顺序 N0→N7 可裁剪：N5/N6 可压缩，N3 完成即有核心演示价值 |
+| 邀请码泄露 | 一次性兑换（兑换后作废）+ 运营者可随时轮换 `INVITE_CODES`；JWT 24h 过期限制泄露影响面 |
+| 无 refresh_token 机制（知乎 OAuth 无此字段，自研 refresh 需自建） | refresh token 由 Worker 自签发（不依赖第三方）；refresh 仅能在兑换后获得 |
+| JWT_SECRET 泄露 | Secrets 管理 + 定期轮换；签发时带 iss/aud 防跨域使用 |
+| token 过期导致用户困惑 | 静默刷新 + 明确「登录已过期，请重新登录」引导 |
+| 登录态丢失（storage.local 被清） | 401 时自动转引导登录，不影响 DIRECT 模式（开发） |
 
-## T-4 · 工作量与顺序
+## O-4 · 工作量与顺序
 
-N0 → N1 → N2 → N3 → N4 → N5 → N6 → N7，总计约 **5～7 天**。
-价值释放点：N1 结束即可演示"智能选源"；N3 结束即达成 §14 Demo 主干（识别→提取→选源→读原文→判定→展示）；N4/N5/N6 为完整性与体验收尾。若时间紧：N4 可并入 N3 简化（先只做"求异出真实来源链接"），N6 的拖动可砍。
+O0 → O1 → O2 → O3 → O4 → O5，总计约 **1.5～2 天**（无需等待外部批复；O1+O2 半天，O3 半天，O4/O5 半天）。
+若时间紧：O4 可砍（仅保留 JWT 鉴权不做用户维度），O3 的 UI 可先只做输入框不做别名展示。
 
-## T-5 · 需要你提供的输入
+## O-5 · 需要你提供的输入
 
-1. TD1-TD5 五个决策点的选择（或"按建议"）
-2. 无新增外部依赖（仍只用现有 deepseek_api.key + zhihu_api.key；Web Reader 用扩展自身权限抓取）
+1. 邀请码策略：初始邀请码数量（默认 1 个测试码，`openssl rand -hex 16`）
+2. 五个决策点（OQ1-OQ5）的选择（或"按建议"）
 
 **请审批：**
-- [√] T-0 架构判断（复用现有链路 + 四块新增）
-- [√] T-1 里程碑拆分与顺序
-- [√] T-2 五个决策点（TD1-TD4 按建议；TD5=保持 84px、下移一点）
-- [√] T-3 风险应对
-- [√] T-4 工作量预期
+- [x] O-0 架构解读（邀请码+JWT 门禁、复用现有代理）
+- [x] O-1 里程碑拆分与顺序
+- [x] O-2 五个决策点（OQ1-OQ5 全部按建议）
+- [x] O-3 风险应对
+- [x] O-4 工作量预期
 
-V2.0 批准记录：已批准（2026-08-26），开始执行 N0。
+V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
+
+## V2.8 执行记录 ✅ 全部完成
+
+| 里程碑 | 提交/位置 | 内容 | 验证 |
+|---|---|---|---|
+| O0 门禁方案确认 | `invite_code.txt`（gitignored） | 测试邀请码生成；运营端=Worker Secrets（INVITE_CODES/JWT_SECRET） | openssl 生成 OK |
+| O1 Worker 兑换+签发 | qiuzhen-proxy/worker.js | POST /auth/redeem（校验→JWT{sub,iss,aud,exp}+refresh）；POST /auth/refresh | 17/17 |
+| O2 Worker JWT 鉴权 | 同上 | isValidUserToken：JWT 优先（HS256+exp+iss/aud），静态 ACCESS_TOKENS fallback | 同上 |
+| O3 扩展登录流 | `fede10a` | invite-jwt.js（兑换/存储/静默刷新/needs_login）+ background 三 AUTH case + panel 登录 UI | 15/15 |
+| O4 用户维度 | qiuzhen-proxy/worker.js | JWT sub 内存限流 2000/天（宽松防滥用，重启归零） | 计数放行 PASS |
+| O5 回归+验收 | 本提交 | smoke 45/45 + V2.5 final 17/17 + 零密钥 0 + 语法全过 + tag v2.8 | 全绿 |
+
+### 关键实现事实
+- **JWT 自研最小实现**（HS256 via crypto.subtle，无外部依赖）：iss=qiuzhen-proxy / aud=qiuzhen-extension；
+  签名/过期/iss-aud 任一不符即拒（篡改/过期/伪造 iss 三个 401 断言全过）
+- **refresh token 自签发**（`rt.<alias>.<exp>.<sig>` 同密钥）——不依赖第三方（对比：知乎 OAuth access_token 仅 1h 且无 refresh）
+- **未登录不致全盲**：llmRequestParts 优先 JWT、回落静态 PROXY_ACCESS_TOKEN（v2.7 行为保持）
+- **DIRECT 模式零影响**：auth 区整区隐藏；独立沙箱验证 direct 双分支（有/无本地密钥）
+- **部署文档**：qiuzhen-proxy/DEPLOY.md（Secrets 清单 + V2.8 认证流 + 上线步骤）
+- 浏览器端 UI 人工验收待做（Chrome 151 自动化环境限制，同 v2.0 起）
+
+### 已知限制（如实记录）
+- 邀请码为 Secrets 逗号分隔表，兑换不销毁（自用规模可接受）；一次性兑换/别名注册需 KV 或 D1，列入 V3 备选
+- 限流计数器 SW 重启归零，非精确配额
+- 同秒重签的 JWT 字面相同（exp 秒级精度）——仅影响测试断言写法，不影响安全
+
+---
+
+# V2.9 · 检索算法闭环（algorizm_fix 分支）
+
+> 依据：`docs/branch_evolution_guide.md`（2026-09-02）+ 仓库根两份 spec
+> （`search_system_P0_P1_modification_spec.md`、`search_system_post_P0_P1_next_stage.md`）。
+> 分支关系：master（≤V2.6）→ feature-cfworker（V2.7+V2.8）→ **algorizm_fix（本分支 ★HEAD）**。
+> 定位：检索/验证系统从「找相关网页」升级为「**先定证据目标 → 兼容门控 → 溯源 → 证据抽取 → 绑定**」的闭环；
+> 原则不变——LLM 负责理解，确定性引擎负责决策约束、排序、去重与证据绑定。
+> 规模：11 个源码文件 +634/−82（含新文件 evidence-extractor.js），6 个提交，**未打 tag、未浏览器回归**。
+
+## V2.9 交付内容（P0–P7 全部落地，提交 f7c5732 → 32565e8）
+
+### P0 组 · 决策权理顺（f7c5732 / 70769c5）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 官方/高校域名后缀规则补全 | `source-registry.js` | `gov.uk`、`ac.uk`、`go.jp`、任意 `.int` 国际组织等均按后缀识别可信来源（不再逐国枚举） |
+| Evidence Target 成为唯一「找什么证据」决策源 | `v25-pipeline.js` | 消除 Query Analyzer 与 Evidence Target 双决策源冲突；检索与排序统一听 ET |
+| Target Compatibility 门控（**eventFit**） | `scoring-engine.js` | 打分前先判「是否真的在谈目标事件」：主体对但事件错（大足区纠纷 vs 招聘通报）→ 打折沉底；不硬删除（宁漏判不错杀）；补上八维缺的 event fit |
+| 时间语义 `temporalMode` | `query-analyzer.js` | claim 分历史事实/当前状态/近期/动态变化/截至某时/永恒成立六类；`temporalMatchScore` 据此打分（「深圳 2006 年校服政策」不当旧资料惩罚） |
+| buildPlan 听 ET 检索策略 | `v25-pipeline.js` | 精确找原文→收敛搜索压社区噪声；广泛印证→放开知乎；溯源→加媒体召回 |
+
+### Phase 1 · URL 可访问性（47aeb36）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| Web Reader 返回访问元数据 | `web-reader.js` | `finalUrl`（跳转）/`canonicalUrl`/`accessStatus`（404、登录墙、JS 渲染、超时细分） |
+| 打不开 ≠ 没证据 | `verify-engine.js` | 404 后先试 canonical，再用「标题+发布者」重搜可访问版本；都失败才降级 |
+| 访问失败不降权威分 | `verify-engine.js` | 权威分在读取前已算好；打不开只影响该证据能否用 |
+
+### Phase 2 · Evidence Extraction（47aeb36 / 0d7117e）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 数值结构化抽取 | `evidence-extractor.js` ★新 | 判定前正则抽取 `35%`/`3.5万亿`/`37人`/`2026年`（带单位+涨跌方向），格式化注入判定 prompt——解决「AI 读到了整段话却说没看到数字」 |
+| 判定引擎读数值 | `verify-engine.js` | 每来源判定可见「本页检测到的数值」清单，数值挂到证据供最终绑定 |
+
+### Phase 3 · 递归溯源（0d7117e）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| Provenance 从一跳变递归 | `provenance.js` | 媒体 A → 路透社 → 警方 → 警方官网 → 追到源头为止 |
+| 受控停止 | `provenance.js` | 深度 ≤3、同 URL 不再追（防环）、命中政府/论文域名即停、预算封顶 |
+| 官方域定向检索 | `provenance.js` | 线索「国家统计局」→ 带 `site:stats.gov.cn` 搜上游 |
+
+### Phase 4 · 来源身份三层（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| platform / publisher / claimedOrigin | `source-analyzer.js` | 区分「托管平台」（公众号/微博/头条）≠「发布账号」≠「内容原产者」（正文自称据央视/路透社）——第三方平台转载央视 ≠ 央视原发 |
+| 身份置信度 | `source-analyzer.js` | 官方域名=HIGH、仅名称一致=MEDIUM、第三方转载无法确认=LOW |
+
+### Phase 5 · 当前页进证据图（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 当前页元数据抽取 | `evidence-extractor.js` | 从 `<meta>`/JSON-LD 抽发布者、发布时间、作者 |
+| 当前页作为候选 | `v25-pipeline.js` | 正在读的文章也进候选池参与打分/验证——能回答「我正看的这篇是不是最新的/转载的」；权威仍按正常规则判定 |
+
+### Phase 6+7 · 动态事实与数字绑定（6bcef68）
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 「截至」参考时间 | `query-analyzer.js` | 「截至2026年8月30日，死亡21人」→ 自动记 `截至 2026年8月30日` |
+| 成稿时间限定 | `analyzer.js` | 动态数据结论要求 LLM 用「截至[来源发布时间/检索时间]」表述，不许输出无时间限定的绝对断言 |
+| 结论数字 ↔ 证据数字绑定 | `analyzer.js` | 结论说「涨了35%」但证据原文找不到 35% → 自动保守处理（supported 降级 partial + 加注） |
+
+## 文件级改动（vs feature-cfworker）
+
+```text
+ analyzer.js           +52   （Phase 6 时间限定 + Phase 7 数字绑定）
+ provenance.js         +131  （Phase 3 递归溯源）
+ query-analyzer.js     +30   （temporalMode + referenceTime）
+ scoring-engine.js     +75   （Target Compatibility 门控 + eventFit）
+ source-analyzer.js    +32   （Phase 4 身份三层）
+ source-registry.js    +9    （国别政府/高校/国际组织后缀）
+ v25-pipeline.js       +51   （ET 单一决策源 + buildPlan 接线 + 当前页候选）
+ verify-engine.js      +153  （URL 失效恢复 + 访问状态 + 数值注入判定）
+ web-reader.js         +62   （Phase 1 访问元数据）
+ evidence-extractor.js +119  ★新文件（Phase 2/5 数值+页面元数据抽取）
+ background.js          2 行 （importScripts 注册 evidence-extractor）
+```
+
+## 验证与状态
+
+- 各阶段仅做 Node 语法检查 + mock 单测；**尚未真实浏览器端到端回归**（guide §5）
+- 待办：加载扩展 → 分别跑「含数字声明求真 / 媒体→上游溯源 / as_of 声明」各一次
+- 分支未打 tag（HEAD=32565e8）；工作区另有整理：`.env/` 入 gitignore（含 metaso_endpoint.txt 移入）、guide 移入 docs/
+
+---
+
+# V3.0 · 可视化动态交互（规划 + 执行记录）
+
+> 依据 `docs/v3.0_UPGRADE.md`（2026-09-06 规划稿）。
+> 定位：**不新增分析能力，新增"被看见的分析过程"**——把 V2.9 已做到的深度用动态可视化讲给用户听。
+> 三条体验线：① 实时工作流剧场（loading 从假进度变真直播）② 渐进式产出（边跑边出）
+> ③ 证据网络（结论 → 可检查的证据地图）。
+> **（本计划待审批）**
+
+## V3.0 计划要点
+
+### 现状问题（v3.0_UPGRADE §1）
+
+| # | 问题 | 根因 |
+|---|---|---|
+| P1 | 算法黑箱：loading 是定时器伪造节奏（panel.js showLoading 内 setTimeout 假推进 3 步），与真实管线脱节 | 管线无阶段上报通道 |
+| P2 | 单次等待 10~30s 画面静止，中间结果不上屏 | 全链路跑完才一次性返回 |
+| P3 | V2.9 深度（递归溯源/八维/数字绑定）只在文字里，用户感知不到 | UI 只渲染最终文本列表 |
+
+### MVP 里程碑
+
+| # | 内容 | 解决 |
+|---|---|---|
+| M0 | 真实管线阶段上报（后台给信号，UI 不再演戏）+ 直播剧场（6 主阶段 + 细节可折叠 + 引擎级细节 + 完成/失败/缓存状态）+ 渐进式产出（候选来源先上屏 → 逐条点亮） | P1+P2 |
+| M1 | 证据网络图：结论绑定线 + 一手/转载分层 + 溯源树展开 + 矛盾并排 + 数字绑定✓/✗可视化 | P3 + 黑客松记忆点 |
+| M2 | 引擎级动画细化（检索光点流动）+ 阶段超时干预（继续/先出结论/取消）+ 求深/求异轻量适配 | 体验加分 |
+
+### 明确不做（V3.0 边界）
+
+- 不重做算法、不改结论逻辑——只把已有过程/结果"翻译"成视觉
+- 不做 3D/炫技动效；不做独立"分析回放"页面（先做面板内嵌）
+
+## V3.0 决策记录（2026-09-06 用户拍板）
+
+| # | 问题 | 决策 |
+|---|---|---|
+| V1 | 直播剧场细节展开策略 | **细节默认展开「当前进行中的主阶段」**（主阶段列表常显；当前阶段细节自动展开，完成后收起、下一个展开） |
+| V2 | 证据网络图主视图 | 按建议：结果页顶部「结论卡 + 关系图」并排，来源卡列表保留下方可切换；窄栏图自动变纵向 |
+| V3 | 渐进式产出深度 | 按建议：先做"候选清单先上屏 + 逐条判定点亮"，全文流式另一工程量级 |
+| V4 | 求深/求异同步改造 | 按建议：仅 M2 轻量适配 |
+| V5 | 降级/无凭证可视提示 | 按建议：检索节点直接显示降级徽标 |
+
+## V3.0 执行记录 ✅（进行中）
+
+| 里程碑 | 提交 | 内容 | 验证 |
+|---|---|---|---|
+| M0a 阶段直播 | `a34e2e2`（+tag `v3.0-m0`） | v25-pipeline 6 主阶段事件（understand→bind，start/done/error）+ search 引擎级子事件；analyzer 透传 onStage；background ANALYZE_STAGE 广播（requestId）；panel 直播剧场（呼吸光点+展开细节，V1 决策） | hermes-verify-v30m0 12/12 + v30m0chain 6/6 + smoke 45/45 |
+| M0b 渐进产出 | `9b48771` | search done 携带 preview（原始候选≤6）；filter done 携带 sortedPreview（类型/一手性徽章）；panel「已找到的来源」候选先上屏 → 逐条点亮（url 去重） | hermes-verify-v30m0b 7/7 + v30m0 回归 + smoke 45/45 |
+| M0c filter 子流水线 | `8cf4562` | filter 拆 7 子步骤事件（dedupe/page_candidate/registry/source_analysis/academic/clusters/score，逐级真实聚合数据）；panel filter 行内纵向子流水线（序号节点+数值行默认展开，连接线图形化数据流） | hermes-verify-v30filterflow 11/11 + v30m0/v30m0b 回归 + smoke 45/45 |
+| M1 证据网络图 | `0bb6d6f` | 新模块 evidence-network.js（buildEvidenceNetwork 纯函数模型：judgment 分组支持/矛盾/未判定 + 类型/一手富化 + 数字绑定 token 匹配 + 溯源链）；panel 结论卡下「证据网络」卡（结论节点 + 连接线动画 + 证据分组并排/窄栏纵向 + 判定徽章/引用/数字✓ chips + 溯源链区） | hermes-verify-v30m1model 14/14 + v30m1verify 7/7 + 全回归 + smoke 45/45 |
+| M2 | 待执行 | 动效细化 + 超时干预 + 求深求异适配 | — |
+
+> 浏览器端 UI 人工验收待做（同 v2.0 起 Chrome 151 限制）：加载扩展 → 求真一次，确认剧场动效流畅、候选渐进点亮、细节展开符合 V1 决策。
+
+---
+
+# 已知环境问题
+
+- **Chrome 151 + --load-extension 的 content script 注入失效**（自动化测试环境）：开发者模式扩展的 content script 不再注入（含最小 hello-world 复现；site access"所有网站"后仅首次导航偶发注入）。注入链模拟证明 5 个 content script 无运行时错误。**影响**：E2E 自动化暂不可用。**缓解**：人工加载扩展正常使用，或降级 Chrome for Testing 跑 E2E。
+- 知乎平台 30001 频率限制窗口（无 Retry-After）：串行+缓存已缓解。
+
+# 遗留事项
+
+V2.6 已知遗留（详见 `docs/v2.6_UPGRADE.md` §6）：
+
+1. Entity–Event Resolution 完整版（多候选事件逐一检索比对）未实现——当前为单次决策状态机
+2. Provenance 未纳入八维权重（仅独立性标记/统计呈现）
+3. preferredSources 未完全路由化（无每种 claimType 的专属检索步）
+4. trace() 上游定向搜索走 metaso；Exa includeDomains 上游追踪未启用
+5. LLM 版 Evidence Target 分析未在真实 API 下联调（冒烟只覆盖规则兜底路径）
+6. 页面被反爬拦截时超链接提取静默回退语义搜索——可加 content-script 侧兜底上报段落 `<a>` 链接
+
+V2.7 已知遗留（详见 `docs/v2.7_UPGRADE.md` §7）：
+
+1. **阶段 3 登录门禁（→ v2.8 计划，见上节）**：原「知乎 OAuth」经官方文档复核调整为「邀请码 + JWT」（2026-08-31 方向调整）
+2. **阶段 4 分发打包 + 密钥轮换（未实施）**：确认 PROXY 零密钥后打包；分发前必须到各平台**撤销旧密钥、生成新密钥**并 `wrangler secret put` 更新（安全警示：改造过程中密钥曾以明文出现在对话/文件中）
+3. 辅助函数重复：7 文件各自定义 isProxy/isLlmAvailable/llmRequestParts，未来可抽共享 `llm-client.js`（需改 background importScripts）
+4. Worker 限流：免费计划无内置 Rate Limiting，当前靠静态令牌 + JWT 过期；规模化需 KV 计数器或 Durable Objects
+5. Worker 流式：passthrough 支持流式，但扩展端 analyzer 为非流式调用
+6. 隐私声明：分发后需诚实说明"查询语句经运营者代理服务器转发"（与诚实溯源原则一致）

@@ -1,6 +1,6 @@
 // Background Service Worker：Active Selection 的唯一中转与持久点（MV3，无独立后端——D2=B）。
 // 职责（PRD 06-技术架构 §4）：接收 CAPTURE_SELECTION → 存 storage.session → 广播/打开 Side Panel。
-importScripts('../generated-config.js', '../utils/message-types.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js', '../ai/v25-pipeline.js');
+importScripts('../generated-config.js', '../utils/message-types.js', '../utils/evidence-network.js', '../auth/invite-jwt.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/evidence-extractor.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/v25-pipeline.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js');
 
 // ---------- Active Selection 状态 ----------
 
@@ -49,6 +49,17 @@ function notifyPanel() {
   });
 }
 
+// V2.8 门禁守卫：PROXY 模式必须已登录（有有效 JWT）才能调用任何 AI/检索 API。
+// 未登录返回 needs_login，面板据此引导登录（悬浮球路径在 orb.js 先查 AUTH_STATE，
+// 未登录直接打开面板、不发 DETECT_CLAIMS）。
+function guardApi(sendResponse) {
+  return WCC_AUTH.isApiAllowed().then(function (allowed) {
+    if (allowed) return true;
+    sendResponse({ ok: false, reason: 'needs_login' });
+    return false;
+  });
+}
+
 // ---------- 消息路由 ----------
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
@@ -88,23 +99,33 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sendResponse({ ok: false, reason: 'bad_payload' });
         return false;
       }
-      WCC_ANALYZER.analyze(message.mode, message.payload).then(
-        function (res) {
-          sendResponse({
-            ok: true,
-            analysis: {
-              result: res.result,
-              cached: res.cached,
-              verified: res.verified,
-              sources: res.sources || null,
-              verification: res.verification || null // V2.5 溯源管线结果
-            }
-          });
-        },
-        function (err) {
-          sendResponse({ ok: false, reason: String(err && err.message || 'analyze_failed') });
+      guardApi(sendResponse).then(function (allowed) {
+        if (!allowed) return;
+        // V3.0 M0：分析阶段直播广播（truth 全管线阶段事件，按 requestId 路由回发起 panel）
+        var reqId = message.requestId || 0;
+        function stageBroadcast(stage) {
+          try {
+            chrome.runtime.sendMessage({ type: WCC_MSG.ANALYZE_STAGE, requestId: reqId, stage: stage }, function () { void chrome.runtime.lastError; });
+          } catch (e) { /* 面板可能已关闭 */ }
         }
-      );
+        WCC_ANALYZER.analyze(message.mode, message.payload, { onStage: stageBroadcast }).then(
+          function (res) {
+            sendResponse({
+              ok: true,
+              analysis: {
+                result: res.result,
+                cached: res.cached,
+                verified: res.verified,
+                sources: res.sources || null,
+                verification: res.verification || null // V2.5 溯源管线结果
+              }
+            });
+          },
+          function (err) {
+            sendResponse({ ok: false, reason: String(err && err.message || 'analyze_failed') });
+          }
+        );
+      });
       return true; // 异步响应
 
     case WCC_MSG.DETECT_CLAIMS:
@@ -113,14 +134,17 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sendResponse({ ok: false, reason: 'bad_document' });
         return false;
       }
-      WCC_CLAIM_DETECTOR.detectClaims(message.document).then(
-        function (res) {
-          sendResponse({ ok: true, index: { claims: res.claims, objectStats: res.objectStats || {}, analyzed: res.analyzed, truncated: res.truncated }, cached: res.cached });
-        },
-        function (err) {
-          sendResponse({ ok: false, reason: String(err && err.message || 'detect_failed') });
-        }
-      );
+      guardApi(sendResponse).then(function (allowed) {
+        if (!allowed) return;
+        WCC_CLAIM_DETECTOR.detectClaims(message.document).then(
+          function (res) {
+            sendResponse({ ok: true, index: { claims: res.claims, objectStats: res.objectStats || {}, analyzed: res.analyzed, truncated: res.truncated }, cached: res.cached });
+          },
+          function (err) {
+            sendResponse({ ok: false, reason: String(err && err.message || 'detect_failed') });
+          }
+        );
+      });
       return true; // 异步响应
 
     case WCC_MSG.OPEN_PANEL_FOR_DOCUMENT:
@@ -149,6 +173,32 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse({ ok: true, pong: true, at: Date.now() });
       return false;
 
+    // ---------- V2.8 登录门禁（邀请码 + JWT） ----------
+    case WCC_MSG.AUTH_LOGIN:
+      (function () {
+        var code = String((message && message.inviteCode) || '').trim();
+        if (!code) { sendResponse({ ok: false, reason: 'invite_code_required' }); return; }
+        WCC_AUTH.redeem(code).then(
+          function (r) { sendResponse({ ok: true, alias: r.alias }); },
+          function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'login_failed') }); }
+        );
+      })();
+      return true; // 异步响应
+
+    case WCC_MSG.AUTH_STATE:
+      WCC_AUTH.getAuthState().then(
+        function (s) { sendResponse({ ok: true, state: s }); },
+        function () { sendResponse({ ok: false, reason: 'state_failed' }); }
+      );
+      return true;
+
+    case WCC_MSG.AUTH_LOGOUT:
+      WCC_AUTH.logout().then(
+        function () { sendResponse({ ok: true }); },
+        function () { sendResponse({ ok: false, reason: 'logout_failed' }); }
+      );
+      return true;
+
     case WCC_MSG.VERIFY_CLAIM:
       // V2.5：溯源管线升级——Query Analyzer → 多引擎检索 → URL 去重 → Registry 先验
       //        → 来源分析 → 证据聚簇 → Scoring 排序 → Top-N Web Reader → 五态结论
@@ -156,12 +206,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sendResponse({ ok: false, reason: 'bad_claim' });
         return false;
       }
-      (function (claim) {
-        WCC_V25.verifyClaimV25(claim).then(
-          function (result) { sendResponse({ ok: true, verification: result }); },
-          function (err) { sendResponse({ ok: false, reason: String(err && err.message || 'verify_failed') }); }
-        );
-      })(message.claim);
+      guardApi(sendResponse).then(function (allowed) {
+        if (!allowed) return;
+        (function (claim) {
+          WCC_V25.verifyClaimV25(claim).then(
+            function (result) { sendResponse({ ok: true, verification: result }); },
+            function (err) { sendResponse({ ok: false, reason: String(err && err.message || 'verify_failed') }); }
+          );
+        })(message.claim);
+      });
       return true; // 异步响应
 
     case WCC_MSG.DISCOVER_DIFFER:
@@ -170,16 +223,19 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sendResponse({ ok: false, reason: 'bad_claim' });
         return false;
       }
-      (function (claim) {
-        // 求异查询加对立倾向词，扩大不同立场召回
-        var differClaim = Object.assign({}, claim);
-        WCC_SEARCH_CONTROLLER.searchForClaim(differClaim).then(function (searchRes) {
-          return WCC_VERIFY_ENGINE.discoverDifferViewpoints(claim, searchRes.candidates);
-        }).then(
-          function (result) { sendResponse({ ok: true, differ: result }); },
-          function (err) { sendResponse({ ok: false, reason: String(err && err.message || 'differ_failed') }); }
-        );
-      })(message.claim);
+      guardApi(sendResponse).then(function (allowed) {
+        if (!allowed) return;
+        (function (claim) {
+          // 求异查询加对立倾向词，扩大不同立场召回
+          var differClaim = Object.assign({}, claim);
+          WCC_SEARCH_CONTROLLER.searchForClaim(differClaim).then(function (searchRes) {
+            return WCC_VERIFY_ENGINE.discoverDifferViewpoints(claim, searchRes.candidates);
+          }).then(
+            function (result) { sendResponse({ ok: true, differ: result }); },
+            function (err) { sendResponse({ ok: false, reason: String(err && err.message || 'differ_failed') }); }
+          );
+        })(message.claim);
+      });
       return true; // 异步响应
 
     default:

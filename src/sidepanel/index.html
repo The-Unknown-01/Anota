@@ -9,7 +9,25 @@
   <header class="panel-header">
     <span class="brand">深读</span>
     <span class="brand-sub">求真 · 求深 · 求异</span>
+    <!-- V2.8 登录门禁（仅代理模式显示；DIRECT 模式隐藏） -->
+    <span id="auth-area" class="auth-area" hidden>
+      <button id="auth-login-btn" class="auth-btn" hidden title="输入邀请码开通使用">登录</button>
+      <span id="auth-user" class="auth-user" hidden></span>
+      <button id="auth-logout-btn" class="auth-btn auth-logout" hidden title="退出登录">退出</button>
+    </span>
   </header>
+
+  <!-- 邀请码输入弹层（V2.8 O3，点击「登录」展开） -->
+  <div id="auth-panel" class="auth-panel glass" hidden>
+    <div class="auth-panel-title">输入邀请码</div>
+    <input id="auth-code-input" class="auth-input" type="text" placeholder="邀请码" autocomplete="off" spellcheck="false" />
+    <div class="auth-panel-actions">
+      <button id="auth-submit" class="auth-btn auth-submit">开通</button>
+      <button id="auth-cancel" class="auth-btn">取消</button>
+    </div>
+    <div id="auth-error" class="auth-error" hidden></div>
+    <div id="auth-hint" class="auth-hint" hidden></div>
+  </div>
 
   <main id="main">
     <!-- Empty 状态（PRD 05-UI-UX §20） -->
@@ -52,10 +70,14 @@
       </button>
     </nav>
 
-    <!-- Loading 分步提示（PRD 05-UI-UX §18） -->
+    <!-- Loading 分步提示（PRD 05-UI-UX §18；V3.0：求真=直播剧场 + 候选渐进点亮） -->
     <section id="loading-state" class="state-card glass" hidden>
       <div id="loading-title" class="loading-title">正在分析……</div>
       <ul id="loading-steps" class="loading-steps"></ul>
+      <div id="candidate-preview" class="candidate-preview" hidden>
+        <div class="candidate-preview-title">已找到的来源</div>
+        <ul id="candidate-list" class="candidate-list"></ul>
+      </div>
     </section>
 
     <!-- Error 状态（PRD 05-UI-UX §19）：可重试，不空白 -->
@@ -81,6 +103,7 @@
   </main>
 
   <script src="../core/utils/message-types.js"></script>
+  <script src="../core/utils/evidence-network.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>

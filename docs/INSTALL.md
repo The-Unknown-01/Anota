@@ -12,16 +12,23 @@
 
 ## 配置 AI 能力（可选但推荐）
 
-无任何凭证时插件仍可安装运行，但 LLM 分析不可用。配置后解锁完整能力：
+无任何凭证时插件仍可安装运行，但 LLM 分析不可用。配置后解锁完整能力。
+
+**两种模式（V2.7 起）**：
+
+| 模式 | 触发 | 密钥位置 | 适用 |
+|---|---|---|---|
+| **PROXY（分发版）** | 项目根存在 `proxy_base.txt` | 全部在 Cloudflare Worker Secrets（扩展零密钥） | 给他人安装/分发 |
+| **DIRECT（开发版）** | 无 `proxy_base.txt` | 项目根 `*_api.key` 文件 | 本地开发调试 |
+
+### DIRECT 模式（开发）
 
 | 凭证文件（放项目根目录） | 解锁能力 | 获取方式 |
 |---|---|---|
 | `deepseek_api.key` | 全部 LLM 分析：三 Tab 深读、全文声明扫描、证据验证 | [platform.deepseek.com](https://platform.deepseek.com) 创建 API Key |
 | `zhihu_api.key` | 求真联网检索（知乎站内+全网双通道）、「已核验」标记 | [developer.zhihu.com](https://developer.zhihu.com) 申请 |
 
-两个文件均已 gitignore，不会被提交。
-
-放置后在项目根执行一次：
+两个文件均已 gitignore，不会被提交。放置后在项目根执行一次：
 
 ```bash
 node scripts/gen-config.js
@@ -31,6 +38,15 @@ node scripts/gen-config.js
 
 - 只配 DeepSeek：可正常使用三 Tab 与悬浮球扫描；求真结果底部明示「未联网核验」
 - 两者都配：求真走完整溯源管线（检索→读原文→五态结论）
+
+### PROXY 模式（分发版 + V2.8 登录门禁）
+
+1. 项目根放 `proxy_base.txt`（内容如 `https://api.anota.best`）+ `proxy_token.txt`（访问令牌，可选）
+2. 运行 `node scripts/gen-config.js` → 输出「(PROXY → https://api.anota.best，零密钥)」；生成物中所有第三方密钥为 `null`
+3. 安装者打开深读面板，点右上角「登录」→ 输入运营者发放的**邀请码** → 自动签发 JWT（24h，过期静默续期 30d）
+4. 未登录时仍可体验界面，代理请求回落到静态令牌；受邀开通后走本人 JWT（可单独撤销）
+
+> 运营者侧：邀请码与 `JWT_SECRET` 通过 `wrangler secret put` 配置在 Worker（见 `qiuzhen-proxy/DEPLOY.md`）。
 
 ## 快速体验
 
@@ -66,6 +82,7 @@ node scripts/gen-config.js
 | 页面上看不到「深读」按钮/悬浮球 | 页面是内部页（chrome:// 等）或扩展刚重载过：刷新页面后重试 |
 | 点击「深读」后侧栏没打开 | 点击浏览器工具栏的扩展图标手动打开；若仍无反应请在扩展管理页确认扩展已启用 |
 | 分析一直失败 / 提示未配置 | 未放置凭证或未跑 `gen-config.js`：见上文「配置 AI 能力」 |
+| 面板右上角出现「登录」按钮 | 这是 PROXY 分发版的 V2.8 登录门禁：输入运营者发放的邀请码即可开通；本地开发请删除 `proxy_base.txt` 并重跑 gen-config 回到 DIRECT 模式 |
 | 求真结果没有「已核验」标记 | 未配置 `zhihu_api.key`（降级为纯模型知识分析）；或知乎平台限流（稍后重试） |
 | 悬浮球分析出错（红色 !） | 多为凭证问题或网络失败：检查 deepseek key 与 gen-config 后刷新扩展重试 |
 | 声明句没有虚线下划线 | 扫描未完成（看悬浮球是否 Ready）或该段是跨内联元素的复杂排版（跳过打标属预期兜底） |

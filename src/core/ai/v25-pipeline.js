@@ -34,6 +34,7 @@
         ok: true,
         text: r.text,
         title: r.title,
+        html: String(r.html || '').slice(0, 400000),   // Phase 5：保留 HTML 供 publisher/publishedAt 元数据抽取
         links: (ET && ET.extractExplicitSourcesFromHtml) ? ET.extractExplicitSourcesFromHtml(r.html) : [],
         at: Date.now()
       } : { ok: false, at: Date.now() };
@@ -68,6 +69,18 @@
     var degraded = false;
     var et = evidenceTarget || {};
 
+    // P0-2：Evidence Target 成为 buildPlan 的决策输入。searchStrategy 决定引擎预算档位；
+    // targetType 的效果经 ET.ruleEvidenceTarget 已映射进 searchStrategy（EXACT_SOURCE 等），
+    // 此处按 searchStrategy 微调引擎配额（基线仍是 questionType 的 ENGINE_BUDGET，不重写八维）。
+    var ss = et.searchStrategy || 'BROAD_CORROBORATION';
+    if (ss === 'EXACT_SOURCE' || ss === 'IDENTIFIER_SEARCH') {
+      budget = { exa: budget.exa + 1, metaso: budget.metaso + 1, zhihu: 0 };          // 精确/标识符：收敛，压社区噪声
+    } else if (ss === 'BROAD_CORROBORATION') {
+      budget = { exa: budget.exa, metaso: budget.metaso, zhihu: Math.max(budget.zhihu, 2) }; // 广泛印证：扩大社区补充
+    } else if (ss === 'PROVENANCE_SEARCH') {
+      budget = { exa: budget.exa, metaso: budget.metaso + 1, zhihu: 1 };             // 溯源：加媒体召回
+    }
+
     // §14/§15：显式来源步（页面已提供 DOI/URL/arXiv/PMID → 直接取原文，禁止先跳语义搜索）
     (et.explicitSources || []).slice(0, 2).forEach(function (s) {
       var url = null;
@@ -101,15 +114,47 @@
   }
 
   // ---------- 主流程 ----------
-  // verifyClaimV25(claim, meta) -> Promise<verification>
+  // verifyClaimV25(claim, meta, onStage) -> Promise<verification>
   // meta.context: { title, url, paragraph, surroundingText }（upgrade.md §5 Context Extraction 输入）
-  function verifyClaimV25(claim, meta) {
+  // onStage(stage)（V3.0 M0）：真实管线阶段直播。stage = { phase, status, detail }
+  //   phase 枚举：understand(理解目标)/search(检索)/filter(筛选)/trace(溯源)/verify(核对)/bind(绑定)
+  //   status 枚举：start / done / error；detail 为各阶段上下文（search 含引擎级 detail）
+  var STAGE_DEFS = [
+    { id: 'understand', label: '理解目标' },
+    { id: 'search',     label: '多路检索' },
+    { id: 'filter',     label: '筛出来源' },
+    { id: 'trace',      label: '递归溯源' },
+    { id: 'verify',     label: '逐条核对' },
+    { id: 'bind',       label: '绑定结论' }
+  ];
+  function makeEmitter(onStage) {
+    var noop = function () {};
+    if (typeof onStage !== 'function') return { start: noop, done: noop, error: noop, sub: noop };
+    var safe = function (phase, status, detail) {
+      try { onStage({ phase: phase, status: status, detail: detail || {}, def: (function () { for (var i = 0; i < STAGE_DEFS.length; i++) if (STAGE_DEFS[i].id === phase) return STAGE_DEFS[i]; return null; })() }); } catch (e) {}
+    };
+    return {
+      start: function (phase) { safe(phase, 'start'); },
+      done: function (phase, detail) { safe(phase, 'done', detail); },
+      error: function (phase, detail) { safe(phase, 'error', detail); },
+      // V3.0 子流水线：主阶段内细分步骤（filter 7 步等），detail.sub 标识子步骤
+      sub: function (phase, subId, detail) {
+        var d = detail || {};
+        d.sub = subId;
+        safe(phase, 'sub', d);
+      }
+    };
+  }
+
+  function verifyClaimV25(claim, meta, onStage) {
     meta = meta || {};
+    var STAGE = makeEmitter(onStage);
     var context = meta.context || { paragraph: claim.text };
     var claimText = String(claim.text || '');
 
     // ① 前置决策层（upgrade.md Phase1）：Evidence Targeting（与 Query Analyzer 并行，省一次串行等待）
     //    同时并行抓取文章页 HTML——论文超链接（<a href>）只有抓页面才能拿到（upgrade.md §14）
+    STAGE.start('understand');
     var cachedStrategy = strategyCache[claimText];
     var strategyP = cachedStrategy
       ? Promise.resolve(cachedStrategy)
@@ -126,20 +171,57 @@
       var evidenceTarget = r[1];
       var page = r[2];
 
+      STAGE.done('understand', {
+        questionType: strategy.questionType || 'unknown',
+        targetType: (evidenceTarget && evidenceTarget.targetType) || null,
+        sourceRequirement: strategy.sourceRequirement || null
+      });
+
       // 页面超链接来源并入（论文以超链接引用时，显式来源从这里来；失败则静默降级）
       if (page && page.ok && ET && ET.mergeExplicitSources) {
         ET.mergeExplicitSources(evidenceTarget, page.text, page.links);
+      }
+
+      // 单点决策权（接线修复）：Evidence Target 是"找什么证据"的唯一策略源，
+      // 覆盖 Query Analyzer 的同名字段。QA 只保留"理解类"字段（keywords/entities/
+      // questionFocus/scopeLevel/questionType），不再与 ET 各自决定 preferredSources。
+      if (evidenceTarget) {
+        if (evidenceTarget.preferredSources && evidenceTarget.preferredSources.length) {
+          strategy.preferredSources = evidenceTarget.preferredSources;
+        }
+        strategy.targetType = evidenceTarget.targetType || null;
+        strategy.eventHints = evidenceTarget.eventHints || [];
+        strategy.claimType = evidenceTarget.claimType || null;
+        strategy.entityResolutionStatus = evidenceTarget.entityResolutionStatus || 'UNRESOLVED';
       }
 
       // ② 引擎计划与检索（串行执行各步；显式来源步优先；总候选上限 14）
       var plan = buildPlan(strategy, claimText, evidenceTarget);
       strategy.degradedExternal = plan.degraded;
 
+      STAGE.start('search');
+
       var searchSeq = Promise.resolve({ merged: [], enginesUsed: [], queryLog: [] });
       var stepIdx = 0;
 
       function runStep(acc) {
-        if (stepIdx >= plan.steps.length || acc.merged.length >= 14) return acc;
+        if (stepIdx >= plan.steps.length || acc.merged.length >= 14) {
+          // 检索阶段结束（一次完整上报，供 UI 渐进式产出：候选先上屏）
+          STAGE.done('search', {
+            enginesUsed: acc.enginesUsed,
+            rawCount: acc.merged.length,
+            queryLog: acc.queryLog,
+            // V3.0 M0b：候选预览（去重前原始结果，供 UI 渐进式点亮；最多 6 条）
+            preview: acc.merged.slice(0, 6).map(function (it) {
+              return {
+                title: String(it.title || it.url || '').slice(0, 80),
+                url: String(it.url || ''),
+                engine: it.engine || 'unknown'
+              };
+            })
+          });
+          return acc;
+        }
         var step = plan.steps[stepIdx++];
         var q = String(step.query || '').slice(0, 200);
         if (step.engine === 'explicit') {
@@ -169,6 +251,8 @@
           acc.enginesUsed.push(step.engine + '(' + items.length + ')');
           acc.queryLog.push({ engine: step.engine, query: q, hits: items.length });
           acc.merged = acc.merged.concat(items);
+          // 引擎级直播：每路检索完成即上报（供 UI 显示"Exa 已回 5 条"）
+          try { onStage && onStage({ phase: 'search', status: 'engine', detail: { engine: step.engine, hits: items.length, query: q } }); } catch (e2) {}
           return acc;
         }, function () {
           return acc;
@@ -176,11 +260,47 @@
       }
 
       return searchSeq.then(runStep).then(function (acc) {
-        // ③ URL 规范化去重（§3）
+        // ③ URL 规范化去重（§3）→ V3.0 filter 子流水线第 1 步
+        STAGE.start('filter');
         var dd = UU.dedupeByNormalizedUrl(acc.merged, function (it) { return it.url; });
         var candidates = dd.unique;
+        STAGE.sub('filter', 'dedupe', {
+          rawCount: acc.merged.length,
+          keptCount: candidates.length,
+          droppedCount: dd.droppedCount || 0
+        });
+
+        // Phase 5：当前页面作为一等候选进入证据图（context source + candidate）。→ 子流水线第 2 步
+        // 不是"当前页=权威"；其权威仍由 Registry/Source Analyzer 判定。有缓存正文供验证复用（免重复抓取）。
+        var pageAdded = false;
+        if (context && context.url && page && page.ok) {
+          var normCP = UU.normalizeUrl(context.url);
+          var cpDup = candidates.some(function (c) { return UU.normalizeUrl(c.url) === normCP; });
+          if (!cpDup) {
+            var EE5 = global.WCC_EVIDENCE_EXTRACTOR;
+            var pageMeta = (EE5 && EE5.extractPageMeta) ? EE5.extractPageMeta(page.html || '') : {};
+            candidates.unshift({
+              url: context.url,
+              title: page.title || context.title || context.url,
+              snippet: String(page.text || '').slice(0, 300),
+              origin: 'page',
+              engine: 'current_page',
+              sourceKind: 'CURRENT_PAGE',
+              publishedDate: pageMeta.publishedAt || null,
+              cachedBody: page.text || '',
+              cachedTitle: page.title || '',
+              currentPageMeta: { publisher: pageMeta.publisher || null, author: pageMeta.author || null }
+            });
+            pageAdded = true;
+          }
+        }
+        STAGE.sub('filter', 'page_candidate', {
+          added: pageAdded ? 1 : 0,
+          hasContextPage: (context && context.url && page && page.ok) ? 1 : 0
+        });
 
         if (!candidates.length) {
+          STAGE.error('filter', { reason: 'no_candidates' });
           return {
             verdict: 'no_source',
             detail: '多引擎检索无结果',
@@ -193,40 +313,104 @@
           };
         }
 
-        // ④ Registry 先验 + ⑤ 来源分析（串行防限流）
+        // ④ Registry 先验（子流水线第 3 步）+ ⑤ 来源分析（串行防限流，第 4 步）
         candidates.forEach(function (it) { it.registryInfo = REG.lookup(it.url); });
+        var registryDist = {};
+        candidates.forEach(function (it) {
+          var r = it.registryInfo || {};
+          var tier = (r.known ? (r.tier || 'unknown') : 'unknown');
+          registryDist[tier] = (registryDist[tier] || 0) + 1;
+        });
+        STAGE.sub('filter', 'registry', { dist: registryDist, total: candidates.length });
+
         return SA.analyzeSources(candidates).then(function (analyzed) {
-          // §15/§16 Academic Exact-Source 验证：论文候选身份确认（TARGET_PAPER vs RELATED_PAPER）
+          // 子流水线第 4 步完成：身份分析分布
+          var typeDist = {}, originDist = {};
+          analyzed.forEach(function (it) {
+            var a = it.sourceAnalysis || {};
+            var t = a.sourceType || 'other';
+            typeDist[t] = (typeDist[t] || 0) + 1;
+            var o = a.originality === 'original' ? 'original' : (it.suspectedSyndication ? 'syndicated_likely' : 'syndicated');
+            originDist[o] = (originDist[o] || 0) + 1;
+          });
+          STAGE.sub('filter', 'source_analysis', { typeDist: typeDist, originDist: originDist, total: analyzed.length });
+
+          // 子流水线第 5 步：Academic Exact-Source 验证（论文候选身份确认，非论文声明跳过）
+          var paperCounts = { target: 0, related: 0, skipped: 1 };
           if (evidenceTarget && evidenceTarget.claimType === 'ACADEMIC' && AC) {
             var paperTarget = AC.buildTarget(evidenceTarget.explicitSources || [], claimText);
             if (paperTarget && (paperTarget.doi || paperTarget.arxiv || paperTarget.pmid || paperTarget.title)) {
+              paperCounts.skipped = 0;
               analyzed.forEach(function (it) {
                 var pv = AC.validatePaper(it, paperTarget);
                 it.paperStatus = pv.status;
                 it.paperMatchedOn = pv.matchedOn;
+                if (pv.status === 'TARGET_PAPER') paperCounts.target++;
+                else if (pv.status === 'RELATED_PAPER') paperCounts.related++;
               });
             }
           }
+          STAGE.sub('filter', 'academic', paperCounts);
 
-          // ⑥ 证据聚簇（§9）
+          // ⑥ 证据聚簇（§9，子流水线第 6 步）
           EG.buildClusters(analyzed);
-          // ⑦ Scoring 排序（八维 + preferredSources + firstParty + 转载降权）
+          var clusterCount = 0, dupLevels = { duplicate: 0, likely: 0, possible: 0, independent: 0 };
+          var seenCid = {};
+          analyzed.forEach(function (it) {
+            if (it.evidenceClusterId && !seenCid[it.evidenceClusterId]) { seenCid[it.evidenceClusterId] = 1; clusterCount++; }
+            var lvl = it.duplicateLevel || (it.independence === 'INDEPENDENT' ? 'independent' : null);
+            if (lvl && lvl in dupLevels) dupLevels[lvl]++;
+          });
+          STAGE.sub('filter', 'clusters', { clusterCount: clusterCount, dupLevels: dupLevels, total: analyzed.length });
+
+          // ⑦ Scoring 排序（八维 + preferredSources + firstParty + 转载降权，子流水线第 7 步）
           var ranked = SE.rank(analyzed, strategy, claimText);
+          var topScore = ranked.ranked.length ? ranked.ranked[0].scoreTotal : 0;
+          var dims = (ranked.ranked[0] && ranked.ranked[0].scores) ? ranked.ranked[0].scores : null;
+          STAGE.sub('filter', 'score', { topScore: topScore, topTitle: ranked.ranked.length ? String(ranked.ranked[0].title || ranked.ranked[0].url || '').slice(0, 60) : '', dims: dims });
+
+          STAGE.done('filter', {
+            uniqueCount: ranked.ranked.length,
+            engineBreakdown: (function () {
+              var by = {};
+              ranked.ranked.forEach(function (c) { by[c.engine] = (by[c.engine] || 0) + 1; });
+              return by;
+            })(),
+            // V3.0 M0b：排序后候选（供 UI 渐进式点亮，带类型/一手性徽章；最多 6 条）
+            sortedPreview: ranked.ranked.slice(0, 6).map(function (c) {
+              var a = c.sourceAnalysis || {};
+              return {
+                title: String(c.title || c.url || '').slice(0, 80),
+                url: String(c.url || ''),
+                sourceType: a.sourceType || 'other',
+                originality: a.originality === 'original' ? '一手' : (c.suspectedSyndication ? '疑似转载' : '二手'),
+                engine: c.engine || 'unknown'
+              };
+            })
+          });
 
           // ⑧ Provenance Tracing（upgrade.md §17~§24，预算受控；失败不阻断主流程）
+          STAGE.start('trace');
           var traceP = (PV && PV.trace)
-            ? PV.trace(ranked.ranked.slice(0, 8), claim, { maxUpstreamCandidates: 3, maxPageReads: 3, maxAdditionalSearches: 3 })
+            ? PV.trace(ranked.ranked.slice(0, 8), claim, { maxUpstreamCandidates: 3, maxDepth: 3, maxPageReads: 5, maxAdditionalSearches: 5 })
               .catch(function () { return { traced: [], upstreamHits: [], stops: ['trace_error'] }; })
             : Promise.resolve({ traced: [], upstreamHits: [], stops: [] });
 
           return traceP.then(function (traceRes) {
             // 共同上游检测（§23/§28）：注入 provenanceClusterId / independence
             if (PV && PV.buildGraph) PV.buildGraph(ranked.ranked);
+            STAGE.done('trace', {
+              upstreamCount: (traceRes.traced || []).length,
+              stops: traceRes.stops || []
+            });
 
             // ⑨ Top-N 多样性验证（§19 + §29：同 provenance 簇不占多个验证位；复用已读正文）
+            STAGE.start('verify');
             var topN = ranked.ranked.slice(0, 8);
             return VE.verifyClaim(claim, topN).then(function (v) {
               // ⑩ Binding + Hard Validation（§30/§31/§35）
+              STAGE.done('verify', { readsOk: (v && v.evidences) ? v.evidences.length : 0 });
+              STAGE.start('bind');
               var binding = (ET && ET.buildBinding) ? ET.buildBinding(v, evidenceTarget, ranked.ranked) : null;
 
               v.queries = acc.queryLog;
@@ -257,6 +441,11 @@
                 independentCount: ranked.ranked.filter(function (c) { return c.independence === 'INDEPENDENT'; }).length,
                 sharedUpstreamCount: ranked.ranked.filter(function (c) { return c.independence === 'SHARED_UPSTREAM'; }).length
               };
+              STAGE.done('bind', {
+                verdict: (binding && binding.verdict) || null,
+                evidenceCount: (v.evidences || []).length,
+                hardValidationPassed: !!(binding && binding.hardValidation && binding.hardValidation.passed)
+              });
               return v;
             });
           });

@@ -80,56 +80,121 @@
     return { clusters: clusters, items: items };
   }
 
-  // ---------- §24 Upstream Source Retrieval（预算受控） ----------
+  // ---------- §24 / §31-33 Upstream Source Retrieval（Phase 3：受控递归溯源） ----------
   // trace(candidates, claim, budget):
-  //   只追踪 media/org/疑似转载 候选（≤maxUpstreamCandidates）
-  //   读正文（≤maxPageReads）→ 提取线索 → 线索命中上游时做定向检索（≤maxAdditionalSearches）
-  //   返回 { traced, upstreamHits, stops }
+  //   只追踪 media/org/疑似转载 候选（≤maxUpstreamCandidates）。
+  //   递归：候选 → 线索 → 检索/直读上游 → 读上游 → 再抽线索 → 再追，直到：
+  //     ① 命中一手/官方主源（域名特征或已无可追线索）② 环（visited）③ 深度 maxDepth ④ 预算耗尽。
+  //   上游检索优先官方域定向（线索发布者命中官方域名表 → site:），否则 metaso（§16：复用统一检索的官方定向）。
+  //   返回 { traced, upstreamHits, stops }（upstreamHits 带 depth/kind）。
+  var PRIMARY_HOST = /(\.gov\b|\.gov\.|\.edu\b|\.edu\.|\.ac\.[a-z]{2}|\.mil\b|arxiv\.org|pubmed\.|who\.int|un\.org|\.int\b)/i;
+
+  // 取最优线索：显式链接 > 具名引用（按已有顺序取第一条非空）
+  function pickBestClue(clues) {
+    if (!clues || !clues.length) return null;
+    for (var i = 0; i < clues.length; i++) {
+      if (clues[i].url) return clues[i];
+    }
+    for (var j = 0; j < clues.length; j++) {
+      if (clues[j].publisher) return clues[j];
+    }
+    return null;
+  }
+
+  // 检索查询：线索带 URL → 直读；具名引用 → 引用主体 + 声明片段（避免泛搜）
+  function upstreamQueryFor(clue, claim) {
+    if (clue && clue.url) return clue.url;
+    var pub = (clue && clue.publisher) || '';
+    var ct = (claim && claim.text) ? String(claim.text) : '';
+    return (pub + (ct ? ' ' + ct.slice(0, 40) : '')).slice(0, 120);
+  }
+
   function trace(candidates, claim, budget) {
     var READER = global.WCC_WEB_READER;
     var DS = global.WCC_DATASOURCE;
+    var QA = global.WCC_QUERY_ANALYZER;
     budget = budget || {};
     var maxUpstream = budget.maxUpstreamCandidates || 3;
-    var maxReads = budget.maxPageReads || 3;
-    var maxSearches = budget.maxAdditionalSearches || 3;
+    var maxDepth = budget.maxDepth || 3;
+    var maxReads = budget.maxPageReads || 6;
+    var maxSearches = budget.maxAdditionalSearches || 6;
 
     var targets = (candidates || []).filter(function (c) {
       var st = c.sourceAnalysis && c.sourceAnalysis.sourceType;
       return st === 'media' || st === 'org' || c.suspectedSyndication;
     }).slice(0, maxUpstream);
-
     if (!targets.length) return Promise.resolve({ traced: [], upstreamHits: [], stops: ['no_secondary_source'] });
 
-    var chain = Promise.resolve({ reads: 0, searches: 0, stops: [], traced: [], upstreamHits: [] });
+    var acc = { reads: 0, searches: 0, stops: [], traced: [], upstreamHits: [] };
+    var visited = {}; // url -> true，防环（根候选与上游共用）
+
+    // 读 URL 正文并抽线索；返回 {url,title,text,clues} 或 null（失败/环/预算尽）
+    function readAndClue(url) {
+      if (visited[url]) { acc.stops.push('cycle'); return Promise.resolve(null); }
+      if (acc.reads >= maxReads) { acc.stops.push('maxPageReads'); return Promise.resolve(null); }
+      visited[url] = true;
+      acc.reads++;
+      return READER.readUrl(url).then(function (r) {
+        if (!r.ok) { acc.stops.push('read_failed_' + (r.reason || 'unknown')); return null; }
+        var clues = extractProvenance(r.text);
+        acc.traced.push({ url: url, title: r.title || url, clues: clues });
+        return { url: url, title: r.title || url, text: r.text, clues: clues };
+      }).catch(function () { acc.stops.push('trace_error'); return null; });
+    }
+
+    // 判断是否已到主源/边界，否则递归追下一层
+    function maybeRecurse(node, depth) {
+      if (PRIMARY_HOST.test(String(node.url || ''))) { acc.stops.push('primary_source_reached'); return Promise.resolve(); }
+      if (depth >= maxDepth) { acc.stops.push('maxDepth'); return Promise.resolve(); }
+      var clue = pickBestClue(node.clues);
+      if (!clue) { acc.stops.push('no_upstream_clue'); return Promise.resolve(); }
+      return resolveClue(clue, node.url, depth);
+    }
+
+    // 解析一条上游线索：带 URL → 直读；具名引用 → 官方域定向/泛检索 → 读命中并递归
+    function resolveClue(clue, fromUrl, depth) {
+      if (clue && clue.url) {
+        acc.upstreamHits.push({ from: fromUrl, clue: clue, hit: { url: clue.url, title: clue.publisher || '' }, depth: depth, kind: 'explicit_link' });
+        return readAndClue(clue.url).then(function (n) { return n ? maybeRecurse(n, depth + 1) : Promise.resolve(); });
+      }
+      if (acc.searches >= maxSearches) { acc.stops.push('maxAdditionalSearches'); return Promise.resolve(); }
+      var query = upstreamQueryFor(clue, claim);
+      if (!query) { acc.stops.push('no_upstream_clue'); return Promise.resolve(); }
+      // 官方域定向：线索发布者命中官方域名表 → 追加 site:
+      var opts = {};
+      var name = clue && clue.publisher ? String(clue.publisher).toLowerCase() : '';
+      var ent = (QA && QA.ENTITY_OFFICIAL_DOMAINS) ? QA.ENTITY_OFFICIAL_DOMAINS[name] : null;
+      if (ent && ent.domains && ent.domains[0]) opts = { siteDomain: ent.domains[0] };
+      acc.searches++;
+      return DS.engineSearch('metaso', query, 3, opts).catch(function () { return []; }).then(function (hits) {
+        var hit = null;
+        for (var i = 0; i < hits.length && !hit; i++) {
+          var h = hits[i];
+          if (!h || !h.url || h.url === fromUrl || visited[h.url]) continue;
+          hit = h;
+        }
+        if (!hit) { acc.stops.push('no_upstream_hit'); return Promise.resolve(); }
+        acc.upstreamHits.push({ from: fromUrl, clue: clue, hit: { url: hit.url, title: hit.title || '' }, depth: depth, kind: 'search' });
+        return readAndClue(hit.url).then(function (n) { return n ? maybeRecurse(n, depth + 1) : Promise.resolve(); });
+      });
+    }
+
+    // 串行处理各根候选（避免并发撞限流）
+    var chain = Promise.resolve();
     targets.forEach(function (cand) {
-      chain = chain.then(function (acc) {
-        if (acc.reads >= maxReads) { acc.stops.push('maxPageReads'); return acc; }
-        return READER.readUrl(cand.url).then(function (r) {
-          acc.reads++;
-          cand.cachedBody = r.ok ? r.text : null;
-          cand.cachedTitle = r.ok ? r.title : null;
-          cand.provenanceClues = r.ok ? extractProvenance(r.text) : [];
-          acc.traced.push({ url: cand.url, title: cand.title, clues: cand.provenanceClues });
-          if (!r.ok) { acc.stops.push('read_failed_' + r.reason); return acc; }
-          var up = cand.provenanceClues[0];
-          if (!up || !(up.publisher || up.url)) { acc.stops.push('no_upstream_clue'); return acc; }
-          if (acc.searches >= maxSearches) { acc.stops.push('maxAdditionalSearches'); return acc; }
-          var query = up.url || (up.publisher + ' ' + String((claim && claim.text) || '').slice(0, 40));
-          return DS.engineSearch('metaso', query, 3).catch(function () { return []; }).then(function (hits) {
-            acc.searches++;
-            hits.slice(0, 2).forEach(function (h) {
-              acc.upstreamHits.push({ from: cand.url, clue: up, hit: h });
-            });
-            return acc;
-          });
-        }).catch(function () {
-          cand.provenanceClues = cand.provenanceClues || [];
-          acc.stops.push('trace_error');
-          return acc;
+      chain = chain.then(function () {
+        return readAndClue(cand.url).then(function (n) {
+          if (!n) return;
+          cand.cachedBody = n.text;
+          cand.cachedTitle = n.title;
+          cand.provenanceClues = n.clues;
+          var clue = pickBestClue(n.clues);
+          if (!clue) { acc.stops.push('no_upstream_clue'); return; }
+          return resolveClue(clue, cand.url, 1);
         });
       });
     });
-    return chain.then(function (acc) { return acc; });
+    return chain.then(function () { return acc; });
   }
 
   // ---------- §26 Provenance Confidence（规则版） ----------
