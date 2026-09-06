@@ -179,6 +179,41 @@ main { padding: 10px 12px 18px; }
   max-height: 4.6em; opacity: 1;
 }
 
+/* ---- V3.0 filter 子流水线（7 步图形化模块 + 数据默认展开） ---- */
+.stage-subflow {
+  list-style: none; margin: 4px 0 0 17px; padding: 0;
+  width: calc(100% - 17px);
+  border-left: 2px solid rgba(127,127,160,.18);
+}
+.subflow-node {
+  display: flex; align-items: baseline; gap: 6px;
+  position: relative; padding: 3px 0 3px 12px;
+  font-size: 12px; line-height: 1.45;
+  opacity: .45; transition: opacity .3s;
+}
+/* 节点圆点（画在连接线上） */
+.subflow-node::before {
+  content: ""; position: absolute; left: -5px; top: 9px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(127,127,160,.3);
+}
+/* 进行中的父阶段（filter doing）：子步骤更醒目 */
+.stage.doing .subflow-node { opacity: .85; }
+.subflow-node.done { opacity: 1; }
+.subflow-node.done::before { background: var(--ok, #2e9e5b); box-shadow: 0 0 6px rgba(46,158,91,.5); }
+.subflow-num {
+  flex: 0 0 auto; font-size: 10px; min-width: 14px; height: 14px; line-height: 14px;
+  text-align: center; border-radius: var(--radius-full);
+  background: rgba(127,127,160,.14); color: var(--ink-3);
+}
+.subflow-node.done .subflow-num { background: rgba(46,158,91,.18); color: var(--ok, #2e9e5b); font-weight: 700; }
+.subflow-label { flex: 0 0 auto; font-weight: 600; color: var(--ink-1); }
+.subflow-value {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--ink-2); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ---- V3.0 渐进式产出（候选先上屏、逐条点亮） ---- */
 .candidate-preview { margin-top: 10px; border-top: 1px dashed rgba(127,127,160,.18); padding-top: 8px; }
 .candidate-preview-title { font-size: 11px; color: var(--ink-3); margin-bottom: 4px; letter-spacing: .03em; }

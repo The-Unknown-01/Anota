@@ -69,6 +69,59 @@
     { id: 'verify',     label: '逐条核对', hint: '读原文比对声明（存在≠相关≠支持）' },
     { id: 'bind',       label: '绑定结论', hint: '证据编号绑定 + 硬校验 + 数字核对' }
   ];
+  // V3.0 filter 子流水线：筛出来源的内部步骤（数据逐级流动、默认展开）
+  var FILTER_SUBSTEPS = [
+    { id: 'dedupe',          label: 'URL 去重',      hint: '等待' },
+    { id: 'page_candidate',  label: '当前页候选',    hint: '等待' },
+    { id: 'registry',        label: '可信先验',      hint: '等待' },
+    { id: 'source_analysis', label: '身份分析',      hint: '等待' },
+    { id: 'academic',        label: '论文验证',      hint: '等待' },
+    { id: 'clusters',        label: '证据聚簇',      hint: '等待' },
+    { id: 'score',           label: '八维评分',      hint: '等待' }
+  ];
+  var TIER_ZH = { verified: '可信', restricted: '受限', candidate: '候选', unknown: '未识别' };
+  var DUPLEVEL_ZH = { duplicate: '重复', likely: '疑似转载', possible: '可能转载', independent: '独立' };
+  var filterSubDoms = {}; // subId -> { row, value }
+
+  // 生成 filter 子步骤的可视化数据文本（原始数据，默认展示）
+  function filterSubText(sub, detail) {
+    var d = detail || {};
+    switch (sub) {
+      case 'dedupe': return d.rawCount + ' → ' + d.keptCount + '（丢弃 ' + d.droppedCount + '）';
+      case 'page_candidate': return d.added ? '已加入当前页作为候选' : (d.hasContextPage ? '当前页已在候选/重复' : '无当前页上下文');
+      case 'registry': {
+        if (!d.dist) return '统计中';
+        var parts = Object.keys(d.dist).map(function (k) { return (TIER_ZH[k] || k) + ' ' + d.dist[k]; });
+        return parts.join(' · ') || '—';
+      }
+      case 'source_analysis': {
+        var parts2 = [];
+        if (d.typeDist) {
+          parts2.push('类型 ' + Object.keys(d.typeDist).map(function (k) { return k + ':' + d.typeDist[k]; }).join(' '));
+        }
+        if (d.originDist) {
+          parts2.push('一手 ' + (d.originDist.original || 0) + ' / 转载 ' + ((d.originDist.syndicated || 0) + (d.originDist.syndicated_likely || 0)));
+        }
+        return parts2.join(' · ') || '分析中';
+      }
+      case 'academic': return d.skipped ? '非论文声明，跳过' : ('目标 ' + d.target + ' · 相关 ' + d.related);
+      case 'clusters': {
+        var parts3 = ['簇 ' + d.clusterCount];
+        if (d.dupLevels) {
+          Object.keys(d.dupLevels).forEach(function (k) { if (d.dupLevels[k] > 0) parts3.push(DUPLEVEL_ZH[k] + ' ' + d.dupLevels[k]); });
+        }
+        return parts3.join(' · ');
+      }
+      case 'score': {
+        if (d.topScore == null) return '打分中';
+        var txt = 'Top ' + d.topScore.toFixed(0);
+        if (d.dims) txt += ' · 权威' + (d.dims.authority || 0).toFixed(0) + ' 相关' + (d.dims.relevance || 0).toFixed(0);
+        if (d.topTitle) txt += ' · ' + d.topTitle;
+        return txt;
+      }
+      default: return '';
+    }
+  }
   // 当前剧场各阶段 DOM（phase id -> { row, sub, dot }）
   var theater = {};
   var ENGINES_ZH = { exa: 'Exa', metaso: 'metaso', zhihu: '知乎', explicit: '原文', current_page: '当前页' };
@@ -147,6 +200,7 @@
     if (!els.loadingSteps) return;
     els.loadingSteps.innerHTML = '';
     theater = {};
+    filterSubDoms = {};
     resetPreview(); // V3.0 M0b：候选区随剧场重建
     TRUTH_STAGES.forEach(function (s, i) {
       var li = document.createElement('li');
@@ -161,14 +215,45 @@
       sub.className = 'stage-sub';
       sub.textContent = s.hint; // V1：当前进行阶段细节默认展开
       li.appendChild(dot); li.appendChild(name); li.appendChild(sub);
+      // V3.0 filter 子流水线：7 个内部步骤图形化挂到 filter 行内
+      if (s.id === 'filter') {
+        var flow = document.createElement('ul');
+        flow.className = 'stage-subflow';
+        FILTER_SUBSTEPS.forEach(function (fs) {
+          var row = document.createElement('li');
+          row.className = 'subflow-node wait';
+          row.dataset.sub = fs.id;
+          var num = document.createElement('span');
+          num.className = 'subflow-num';
+          num.textContent = String(Array.prototype.indexOf.call(FILTER_SUBSTEPS, fs) + 1);
+          var lbl = document.createElement('span');
+          lbl.className = 'subflow-label';
+          lbl.textContent = fs.label;
+          var val = document.createElement('span');
+          val.className = 'subflow-value';
+          val.textContent = '…';
+          row.appendChild(num); row.appendChild(lbl); row.appendChild(val);
+          flow.appendChild(row);
+          filterSubDoms[fs.id] = { row: row, value: val };
+        });
+        li.appendChild(flow);
+      }
       els.loadingSteps.appendChild(li);
       theater[s.id] = { row: li, sub: sub };
     });
   }
 
-  // 阶段状态更新（status: start/engine/done/error）
+  // 阶段状态更新（status: start/engine/done/error/sub）
   function applyStage(st) {
     if (!st || !st.phase || !theater[st.phase]) return;
+    // V3.0 filter 子流水线：sub 事件驱动子步骤点亮（数据默认展开）
+    if (st.status === 'sub' && st.phase === 'filter' && filterSubDoms[st.detail.sub]) {
+      var fs = filterSubDoms[st.detail.sub];
+      fs.row.classList.remove('wait');
+      fs.row.classList.add('done');
+      fs.value.textContent = filterSubText(st.detail.sub, st.detail);
+      return;
+    }
     var t = theater[st.phase];
     t.row.classList.remove('doing', 'done', 'error');
     if (st.status === 'start') {

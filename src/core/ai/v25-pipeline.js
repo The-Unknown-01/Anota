@@ -129,14 +129,20 @@
   ];
   function makeEmitter(onStage) {
     var noop = function () {};
-    if (typeof onStage !== 'function') return { start: noop, done: noop, error: noop };
+    if (typeof onStage !== 'function') return { start: noop, done: noop, error: noop, sub: noop };
     var safe = function (phase, status, detail) {
       try { onStage({ phase: phase, status: status, detail: detail || {}, def: (function () { for (var i = 0; i < STAGE_DEFS.length; i++) if (STAGE_DEFS[i].id === phase) return STAGE_DEFS[i]; return null; })() }); } catch (e) {}
     };
     return {
       start: function (phase) { safe(phase, 'start'); },
       done: function (phase, detail) { safe(phase, 'done', detail); },
-      error: function (phase, detail) { safe(phase, 'error', detail); }
+      error: function (phase, detail) { safe(phase, 'error', detail); },
+      // V3.0 子流水线：主阶段内细分步骤（filter 7 步等），detail.sub 标识子步骤
+      sub: function (phase, subId, detail) {
+        var d = detail || {};
+        d.sub = subId;
+        safe(phase, 'sub', d);
+      }
     };
   }
 
@@ -254,13 +260,19 @@
       }
 
       return searchSeq.then(runStep).then(function (acc) {
-        // ③ URL 规范化去重（§3）
+        // ③ URL 规范化去重（§3）→ V3.0 filter 子流水线第 1 步
+        STAGE.start('filter');
         var dd = UU.dedupeByNormalizedUrl(acc.merged, function (it) { return it.url; });
         var candidates = dd.unique;
-        STAGE.start('filter');
+        STAGE.sub('filter', 'dedupe', {
+          rawCount: acc.merged.length,
+          keptCount: candidates.length,
+          droppedCount: dd.droppedCount || 0
+        });
 
-        // Phase 5：当前页面作为一等候选进入证据图（context source + candidate）。
+        // Phase 5：当前页面作为一等候选进入证据图（context source + candidate）。→ 子流水线第 2 步
         // 不是"当前页=权威"；其权威仍由 Registry/Source Analyzer 判定。有缓存正文供验证复用（免重复抓取）。
+        var pageAdded = false;
         if (context && context.url && page && page.ok) {
           var normCP = UU.normalizeUrl(context.url);
           var cpDup = candidates.some(function (c) { return UU.normalizeUrl(c.url) === normCP; });
@@ -279,8 +291,13 @@
               cachedTitle: page.title || '',
               currentPageMeta: { publisher: pageMeta.publisher || null, author: pageMeta.author || null }
             });
+            pageAdded = true;
           }
         }
+        STAGE.sub('filter', 'page_candidate', {
+          added: pageAdded ? 1 : 0,
+          hasContextPage: (context && context.url && page && page.ok) ? 1 : 0
+        });
 
         if (!candidates.length) {
           STAGE.error('filter', { reason: 'no_candidates' });
@@ -296,24 +313,62 @@
           };
         }
 
-        // ④ Registry 先验 + ⑤ 来源分析（串行防限流）
+        // ④ Registry 先验（子流水线第 3 步）+ ⑤ 来源分析（串行防限流，第 4 步）
         candidates.forEach(function (it) { it.registryInfo = REG.lookup(it.url); });
+        var registryDist = {};
+        candidates.forEach(function (it) {
+          var r = it.registryInfo || {};
+          var tier = (r.known ? (r.tier || 'unknown') : 'unknown');
+          registryDist[tier] = (registryDist[tier] || 0) + 1;
+        });
+        STAGE.sub('filter', 'registry', { dist: registryDist, total: candidates.length });
+
         return SA.analyzeSources(candidates).then(function (analyzed) {
+          // 子流水线第 4 步完成：身份分析分布
+          var typeDist = {}, originDist = {};
+          analyzed.forEach(function (it) {
+            var a = it.sourceAnalysis || {};
+            var t = a.sourceType || 'other';
+            typeDist[t] = (typeDist[t] || 0) + 1;
+            var o = a.originality === 'original' ? 'original' : (it.suspectedSyndication ? 'syndicated_likely' : 'syndicated');
+            originDist[o] = (originDist[o] || 0) + 1;
+          });
+          STAGE.sub('filter', 'source_analysis', { typeDist: typeDist, originDist: originDist, total: analyzed.length });
+
+          // 子流水线第 5 步：Academic Exact-Source 验证（论文候选身份确认，非论文声明跳过）
+          var paperCounts = { target: 0, related: 0, skipped: 1 };
           if (evidenceTarget && evidenceTarget.claimType === 'ACADEMIC' && AC) {
             var paperTarget = AC.buildTarget(evidenceTarget.explicitSources || [], claimText);
             if (paperTarget && (paperTarget.doi || paperTarget.arxiv || paperTarget.pmid || paperTarget.title)) {
+              paperCounts.skipped = 0;
               analyzed.forEach(function (it) {
                 var pv = AC.validatePaper(it, paperTarget);
                 it.paperStatus = pv.status;
                 it.paperMatchedOn = pv.matchedOn;
+                if (pv.status === 'TARGET_PAPER') paperCounts.target++;
+                else if (pv.status === 'RELATED_PAPER') paperCounts.related++;
               });
             }
           }
+          STAGE.sub('filter', 'academic', paperCounts);
 
-          // ⑥ 证据聚簇（§9）
+          // ⑥ 证据聚簇（§9，子流水线第 6 步）
           EG.buildClusters(analyzed);
-          // ⑦ Scoring 排序（八维 + preferredSources + firstParty + 转载降权）
+          var clusterCount = 0, dupLevels = { duplicate: 0, likely: 0, possible: 0, independent: 0 };
+          var seenCid = {};
+          analyzed.forEach(function (it) {
+            if (it.evidenceClusterId && !seenCid[it.evidenceClusterId]) { seenCid[it.evidenceClusterId] = 1; clusterCount++; }
+            var lvl = it.duplicateLevel || (it.independence === 'INDEPENDENT' ? 'independent' : null);
+            if (lvl && lvl in dupLevels) dupLevels[lvl]++;
+          });
+          STAGE.sub('filter', 'clusters', { clusterCount: clusterCount, dupLevels: dupLevels, total: analyzed.length });
+
+          // ⑦ Scoring 排序（八维 + preferredSources + firstParty + 转载降权，子流水线第 7 步）
           var ranked = SE.rank(analyzed, strategy, claimText);
+          var topScore = ranked.ranked.length ? ranked.ranked[0].scoreTotal : 0;
+          var dims = (ranked.ranked[0] && ranked.ranked[0].scores) ? ranked.ranked[0].scores : null;
+          STAGE.sub('filter', 'score', { topScore: topScore, topTitle: ranked.ranked.length ? String(ranked.ranked[0].title || ranked.ranked[0].url || '').slice(0, 60) : '', dims: dims });
+
           STAGE.done('filter', {
             uniqueCount: ranked.ranked.length,
             engineBreakdown: (function () {
