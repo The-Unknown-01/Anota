@@ -41,7 +41,8 @@
     results: {},          // mode -> { result, cached }
     verified: {},         // claimId -> supportLevel（概览已核实统计）
     analyzing: false,
-    seq: 0                // 丢弃过期响应（连续深读时旧响应作废）
+    seq: 0,               // 丢弃过期响应（连续深读时旧响应作废）
+    reqSeq: 0             // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
   };
 
   var CLAIM_TYPE_NAMES = { fact: '事实', number: '数字', causal: '因果', compare: '比较', predict: '预测', define: '定义', person: '人物事件', other: '其他', opinion: '观点' };
@@ -58,6 +59,100 @@
   };
 
   var MODE_NAMES = { truth: '求真', deep: '求深', differ: '求异' };
+
+  // ---------- V3.0 M0：求真直播剧场（真实管线阶段） ----------
+  var TRUTH_STAGES = [
+    { id: 'understand', label: '理解目标', hint: '判断声明类型与要找的证据' },
+    { id: 'search',     label: '多路检索', hint: 'Exa/metaso 等多引擎并行召回' },
+    { id: 'filter',     label: '筛出来源', hint: '去重 → 可信先验 → 身份分析 → 聚簇 → 八维评分' },
+    { id: 'trace',      label: '递归溯源', hint: '顺着引用追到源头（深度≤3、命中官方即停）' },
+    { id: 'verify',     label: '逐条核对', hint: '读原文比对声明（存在≠相关≠支持）' },
+    { id: 'bind',       label: '绑定结论', hint: '证据编号绑定 + 硬校验 + 数字核对' }
+  ];
+  // 当前剧场各阶段 DOM（phase id -> { row, sub, dot }）
+  var theater = {};
+  var ENGINES_ZH = { exa: 'Exa', metaso: 'metaso', zhihu: '知乎', explicit: '原文', current_page: '当前页' };
+
+  function stageSubText(phase, detail) {
+    // 生成阶段完成摘要（V1：完成阶段收起为一行摘要；进行中阶段展开 hint）
+    if (!detail) return null;
+    var d = detail;
+    switch (phase) {
+      case 'understand':
+        return ['已理解目标', d.questionType ? '类型=' + d.questionType : '', d.targetType ? '目标=' + d.targetType : ''].filter(Boolean).join(' · ');
+      case 'search': {
+        var en = [];
+        if (d.engine) en.push((ENGINES_ZH[d.engine] || d.engine) + ' ' + (d.hits || 0) + ' 条');
+        if (d.rawCount != null) en.push('共 ' + d.rawCount + ' 条原始结果');
+        return en.join(' · ') || null;
+      }
+      case 'filter': {
+        var parts = ['筛出 ' + (d.uniqueCount != null ? d.uniqueCount : '?') + ' 个候选'];
+        if (d.engineBreakdown) {
+          parts.push(Object.keys(d.engineBreakdown).map(function (k) { return (ENGINES_ZH[k] || k) + ' ' + d.engineBreakdown[k]; }).join(' / '));
+        }
+        return parts.join(' · ');
+      }
+      case 'trace':
+        return '追到 ' + (d.upstreamCount != null ? d.upstreamCount : 0) + ' 个上游' + ((d.stops && d.stops.length) ? '（停止：' + d.stops.join(',') + '）' : '');
+      case 'verify':
+        return '核对 ' + (d.readsOk != null ? d.readsOk : '?') + ' 条证据' + (d.error ? '（' + d.error + '）' : '');
+      case 'bind':
+        return '绑定完成' + (d.evidenceCount != null ? ' · ' + d.evidenceCount + ' 条证据' : '') + (d.verdict ? ' · ' + d.verdict : '');
+      default: return null;
+    }
+  }
+
+  function buildTheater() {
+    if (!els.loadingSteps) return;
+    els.loadingSteps.innerHTML = '';
+    theater = {};
+    TRUTH_STAGES.forEach(function (s, i) {
+      var li = document.createElement('li');
+      li.className = 'stage' + (i === 0 ? ' doing' : ''); // V1：第一行乐观展开（真实事件到达后接管）
+      li.dataset.phase = s.id;
+      var dot = document.createElement('span');
+      dot.className = 'stage-dot';
+      var name = document.createElement('span');
+      name.className = 'stage-name';
+      name.textContent = s.label;
+      var sub = document.createElement('span');
+      sub.className = 'stage-sub';
+      sub.textContent = s.hint; // V1：当前进行阶段细节默认展开
+      li.appendChild(dot); li.appendChild(name); li.appendChild(sub);
+      els.loadingSteps.appendChild(li);
+      theater[s.id] = { row: li, sub: sub };
+    });
+  }
+
+  // 阶段状态更新（status: start/engine/done/error）
+  function applyStage(st) {
+    if (!st || !st.phase || !theater[st.phase]) return;
+    var t = theater[st.phase];
+    t.row.classList.remove('doing', 'done', 'error');
+    if (st.status === 'start') {
+      t.row.classList.add('doing');
+      t.sub.textContent = (TRUTH_STAGES.filter(function (s) { return s.id === st.phase; })[0] || {}).hint || '进行中';
+    } else if (st.status === 'engine') {
+      // 检索中某引擎返回：追加实时行（V3.0 渐进式细节）
+      var add = stageSubText('search', st.detail);
+      if (add && t.sub.textContent.indexOf(add) === -1) {
+        var cur = t.sub.textContent;
+        var parts = cur.split(' · ').filter(function (p) { return p; });
+        parts.push(add);
+        // 只保留最近 3 条引擎消息 + 末尾原始计数
+        t.sub.textContent = parts.slice(-4).join(' · ');
+      }
+      t.row.classList.add('doing');
+    } else if (st.status === 'done') {
+      t.row.classList.add('done');
+      var sub = stageSubText(st.phase, st.detail) || ((TRUTH_STAGES.filter(function (s) { return s.id === st.phase; })[0] || {}).hint || '完成');
+      t.sub.textContent = sub;
+    } else if (st.status === 'error') {
+      t.row.classList.add('error');
+      t.sub.textContent = stageSubText(st.phase, st.detail) || '此步未成功';
+    }
+  }
 
   // ---------- 视图切换 ----------
 
@@ -100,6 +195,14 @@
   }
 
   function showLoading() {
+    if (state.mode === 'truth') {
+      // V3.0 M0：求真直播剧场——真实管线阶段（由 ANALYZE_STAGE 事件驱动，不再假进度）
+      els.loadingTitle.textContent = '求真分析中……';
+      buildTheater();
+      show(els.loading);
+      return;
+    }
+    // deep/differ：轻量步骤提示（V3.0 M2 再接入事件直播）
     els.loadingTitle.textContent = MODE_NAMES[state.mode] + '分析中……';
     els.loadingSteps.innerHTML = '';
     LOADING_STEPS[state.mode].forEach(function (s, i) {
@@ -140,10 +243,12 @@
     if (force) delete state.results[mode];
     state.analyzing = true;
     state.mode = mode;
+    state.reqSeq = (state.reqSeq || 0) + 1; // V3.0：本请求的舞台事件序号
+    var myReq = state.reqSeq;
     renderView();
     try {
       chrome.runtime.sendMessage(
-        { type: WCC_MSG.ANALYZE, mode: mode, payload: state.claimPayload },
+        { type: WCC_MSG.ANALYZE, mode: mode, payload: state.claimPayload, requestId: myReq },
         function (resp) {
           void chrome.runtime.lastError;
           if (seq !== state.seq) return; // 已有新 Claim/模式，丢弃过期响应
@@ -703,6 +808,16 @@
 
     refreshAuthState();
   }
+
+  // ---------- V3.0 M0：分析阶段直播监听（SW → panel） ----------
+  // 只在「求真」进行中且 requestId 匹配当前请求时更新剧场；
+  // 任意阶段出现 error（如引擎全挂）时由后台自动降级继续，UI 按最终响应渲染。
+  chrome.runtime.onMessage.addListener(function (msg) {
+    if (!msg || msg.type !== WCC_MSG.ANALYZE_STAGE) return;
+    if (!state.analyzing || state.mode !== 'truth') return;
+    if (msg.requestId !== state.reqSeq) return; // 过期请求的事件丢弃
+    applyStage(msg.stage);
+  });
 
   renderView();
 })();

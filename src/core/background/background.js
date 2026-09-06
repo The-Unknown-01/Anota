@@ -101,7 +101,14 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       }
       guardApi(sendResponse).then(function (allowed) {
         if (!allowed) return;
-        WCC_ANALYZER.analyze(message.mode, message.payload).then(
+        // V3.0 M0：分析阶段直播广播（truth 全管线阶段事件，按 requestId 路由回发起 panel）
+        var reqId = message.requestId || 0;
+        function stageBroadcast(stage) {
+          try {
+            chrome.runtime.sendMessage({ type: WCC_MSG.ANALYZE_STAGE, requestId: reqId, stage: stage }, function () { void chrome.runtime.lastError; });
+          } catch (e) { /* 面板可能已关闭 */ }
+        }
+        WCC_ANALYZER.analyze(message.mode, message.payload, { onStage: stageBroadcast }).then(
           function (res) {
             sendResponse({
               ok: true,

@@ -22,6 +22,7 @@
     AUTH_LOGIN: 'AUTH_LOGIN',        // V2.8：邀请码兑换（panel → SW）
     AUTH_STATE: 'AUTH_STATE',        // V2.8：查询登录态（panel → SW）
     AUTH_LOGOUT: 'AUTH_LOGOUT',      // V2.8：退出登录（panel → SW）
+    ANALYZE_STAGE: 'ANALYZE_STAGE',  // V3.0：分析阶段直播事件（SW → panel，广播）
     // content script → background：悬浮球 Ready 点击，打开面板并携带本文 Claim Index（U4 概览态用）
     OPEN_PANEL_FOR_DOCUMENT: 'OPEN_PANEL_FOR_DOCUMENT',
     // 诊断

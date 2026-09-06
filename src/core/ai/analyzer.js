@@ -249,12 +249,15 @@ function extractClaimedDataTokens(text) {
   return out;
 }
 
-// analyze(mode, payload) -> Promise<result>
+// analyze(mode, payload, opts) -> Promise<result>
 // result: { mode, result, cached, sources?, verified }
+// opts.onStage（V3.0 M0）：分析阶段直播回调（透传至 verifyClaimV25 等）
 // V2.0 N5 双模式分离：本入口是「主动询问」链路（用户选中/Hover 点击），
 // 允许深入语义判断；「自动扫描」走 claim-detector（只发现+分类+定位，不验证）。
 // differ 模式额外注入真实不同立场来源（N4），禁止 AI 编造。
-function analyze(mode, payload) {
+function analyze(mode, payload, opts) {
+  opts = opts || {};
+  var onStage = (typeof opts.onStage === 'function') ? opts.onStage : null;
   if (!SYSTEM_PROMPTS[mode]) return Promise.reject(new Error('unknown_mode'));
   var key = cacheKey(mode, String(payload.selectedText || ''), payload.url);
   return cacheGet(key).then(function (hit) {
@@ -280,7 +283,8 @@ function analyze(mode, payload) {
       ? global.WCC_V25.verifyClaimV25(
           { text: payload.selectedText, sourceRequirement: payload.__sourceRequirement || 'any', id: payload.__claimId },
           // upgrade.md §5：Context Extraction 输入（页面上下文，供 Evidence Targeting 使用）
-          { context: { title: payload.title || '', url: payload.url || '', paragraph: payload.selectedText || '', surroundingText: '' } }
+          { context: { title: payload.title || '', url: payload.url || '', paragraph: payload.selectedText || '', surroundingText: '' } },
+          onStage // V3.0 M0：真实管线阶段直播
         ).then(function (v) {
           // upgrade.md §32/§31：主体歧义 / 硬校验未通过 → 提示合成层保守作答
           var caution = '';

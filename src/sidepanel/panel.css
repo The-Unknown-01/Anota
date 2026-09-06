@@ -142,6 +142,43 @@ main { padding: 10px 12px 18px; }
 .loading-steps li.done::before { content: "✓ "; color: var(--ok); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---- V3.0 求真直播剧场（真实管线阶段） ---- */
+.loading-steps li.stage {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px;
+  padding: 7px 0; border-bottom: 1px solid rgba(127,127,160,.08);
+}
+.loading-steps li.stage:last-child { border-bottom: none; }
+.stage-dot {
+  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  background: rgba(127,127,160,.25); align-self: center;
+  transition: background .3s, box-shadow .3s, transform .3s;
+}
+.loading-steps li.stage.doing .stage-dot {
+  background: var(--accent, #4f6ef7);
+  box-shadow: 0 0 0 0 rgba(79,110,247,.45);
+  animation: pulse-dot 1.4s ease-out infinite;
+}
+@keyframes pulse-dot {
+  0% { box-shadow: 0 0 0 0 rgba(79,110,247,.4); }
+  70% { box-shadow: 0 0 0 7px rgba(79,110,247,0); }
+  100% { box-shadow: 0 0 0 0 rgba(79,110,247,0); }
+}
+.loading-steps li.stage.done .stage-dot { background: var(--ok, #2e9e5b); }
+.loading-steps li.stage.error .stage-dot { background: var(--bad, #d64545); }
+.stage-name { font-weight: 600; color: var(--ink-1); flex: 0 0 auto; }
+.stage-sub {
+  flex: 1 1 100%; /* 独占第二行，避免与标签同行挤压 */
+  margin-left: 17px; /* 与圆点对齐 */
+  color: var(--ink-3); font-size: 11.5px; line-height: 1.5;
+  max-height: 0; opacity: 0; overflow: hidden;
+  transition: max-height .35s ease, opacity .35s ease;
+}
+.loading-steps li.stage.doing .stage-sub,
+.loading-steps li.stage.done .stage-sub,
+.loading-steps li.stage.error .stage-sub {
+  max-height: 4.6em; opacity: 1;
+}
+
 .error-icon { font-size: 26px; color: var(--bad); }
 .error-title { font-weight: 700; margin: 6px 0 2px; }
 .error-detail { font-size: 12.5px; color: var(--ink-2); margin-bottom: 12px; }
