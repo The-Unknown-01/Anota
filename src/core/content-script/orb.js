@@ -73,6 +73,36 @@
     ].join(';');
     orb.appendChild(arc);
 
+    // 下半部"几何波浪"装饰：几道错落的渐变波带互相叠色，制造流动感（纯装饰，不拦截事件）
+    (function () {
+      var NS = 'http://www.w3.org/2000/svg';
+      var svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 84 40');
+      svg.setAttribute('preserveAspectRatio', 'none');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.style.cssText = [
+        'position: absolute', 'left: 0', 'bottom: -1px', 'width: 100%', 'height: 38%',
+        'display: block', 'pointer-events: none', 'z-index: 0', 'overflow: visible'
+      ].join(';');
+      svg.innerHTML = '' +
+        '<defs>' +
+        '<linearGradient id="qzw1" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#5b6cf0" stop-opacity=".9"/><stop offset=".55" stop-color="#5b6cf0" stop-opacity=".45"/><stop offset="1" stop-color="#4f6ef7" stop-opacity=".12"/></linearGradient>' +
+        '<linearGradient id="qzw2" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#8b5cf6" stop-opacity=".9"/><stop offset=".55" stop-color="#8b5cf6" stop-opacity=".45"/><stop offset="1" stop-color="#7c3aed" stop-opacity=".12"/></linearGradient>' +
+        '<linearGradient id="qzw3" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#e879b9" stop-opacity=".85"/><stop offset=".55" stop-color="#e879b9" stop-opacity=".42"/><stop offset="1" stop-color="#f0abfc" stop-opacity=".1"/></linearGradient>' +
+        '</defs>' +
+        // 后层 → 前层：每道波带 = 渐变填充 + 一道同色细描线（几何线条感）
+        '<path d="M0 13 C 9 6, 18 6, 27 11 S 45 18, 54 12 S 72 6, 84 10 L 84 40 L 0 40 Z" fill="url(#qzw1)"/>' +
+        '<path d="M0 13 C 9 6, 18 6, 27 11 S 45 18, 54 12 S 72 6, 84 10" fill="none" stroke="#7f92ff" stroke-width="1.1" opacity=".55"/>' +
+        '<path d="M0 20 C 10 13, 24 12, 33 17 S 57 25, 68 19 S 80 16, 84 19 L 84 40 L 0 40 Z" fill="url(#qzw2)"/>' +
+        '<path d="M0 20 C 10 13, 24 12, 33 17 S 57 25, 68 19 S 80 16, 84 19" fill="none" stroke="#a78bfa" stroke-width="1.1" opacity=".5"/>' +
+        '<path d="M0 27 C 12 21, 25 20, 36 24 S 60 31, 72 25 S 80 24, 84 26 L 84 40 L 0 40 Z" fill="url(#qzw3)"/>' +
+        '<path d="M0 27 C 12 21, 25 20, 36 24 S 60 31, 72 25 S 80 24, 84 26" fill="none" stroke="#f0a6d8" stroke-width="1.1" opacity=".5"/>';
+      orb.appendChild(svg);
+    })();
+
     // 动画 keyframes 注入一次（B·雷达扫描 + 就绪脉冲）
     if (!document.getElementById('qiuzhen-spin-style')) {
       var st = document.createElement('style');
