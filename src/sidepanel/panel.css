@@ -89,7 +89,6 @@ main { padding: 10px 12px 18px; }
 
 /* ---------- Claim 卡片 ---------- */
 .claim-card {
-  position: sticky; top: 8px; z-index: 10;
   margin-bottom: 10px; padding: 11px 14px;
 }
 .claim-label { font-size: 10px; color: var(--ink-3); letter-spacing: 2px; }
@@ -111,11 +110,9 @@ main { padding: 10px 12px 18px; }
 
 /* ---------- Tab 导航 ---------- */
 .mode-tabs {
-  position: sticky; top: 8px; z-index: 10;
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
   padding: 5px; margin-bottom: 10px;
 }
-.mode-tabs.shifted { top: auto; position: static; }
 .tab {
   border: none; background: transparent; cursor: pointer;
   border-radius: calc(var(--radius-2xl) - 6px);
@@ -128,8 +125,6 @@ main { padding: 10px 12px 18px; }
   box-shadow: inset 0 0 0 1px rgba(79, 110, 247, .35);
 }
 .tab-name { display: block; font-size: 14px; font-weight: 700; color: var(--ink); }
-.tab-q { display: block; font-size: 10px; color: var(--ink-3); }
-.tab.active .tab-q { color: var(--accent); }
 
 /* ---------- Loading / Error ---------- */
 .state-card { padding: 16px; margin-bottom: 10px; }
@@ -307,7 +302,10 @@ li.cand.lit .cand-type { background: rgba(46,158,91,.16); color: var(--ok, #2e9e
   transition: all var(--fluid);
 }
 .node-chip:hover { background: rgba(79, 110, 247, .14); border-color: var(--accent); transform: translateY(-1px); }
-.node-chip::after { content: " ↗"; font-size: 10px; color: var(--ink-3); }
+.node-chip.selected { background: linear-gradient(135deg, rgba(79,110,247,.20), rgba(139,92,246,.20)); border-color: var(--accent); }
+.node-chip.loading { opacity: .55; cursor: progress; }
+.node-chip.visited { opacity: .6; border-style: dashed; }
+.node-chip.error-chip { border-color: rgba(229,83,63,.5); color: #e5533f; }
 
 .concept-line { display: flex; gap: 8px; align-items: baseline; margin: 7px 0; font-size: 13px; }
 .concept-name { flex-shrink: 0; font-weight: 700; color: var(--accent); }
@@ -517,3 +515,46 @@ a.net-trace-from:hover, a.net-trace-hit:hover { color: var(--accent); }
   font-size: 10px; color: var(--ink-3);
   background: rgba(127,127,160,.1); padding: 0 6px; border-radius: var(--radius-full);
 }
+
+/* ---------- V3.1：求深·上下文深读（知识树局部交互） ---------- */
+.deep-head { display: flex; align-items: center; gap: 8px; }
+.deep-loading {
+  display: flex; align-items: center; gap: 9px;
+  padding: 13px 15px; margin: 4px 0 10px;
+  color: var(--ink-2); font-size: 13px;
+  background: rgba(127,127,160,.07); border-radius: var(--radius-xl);
+}
+.deep-loading .spinner {
+  width: 14px; height: 14px; flex: none;
+  border: 2px solid rgba(79,110,247,.28); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite;
+}
+.deep-fade { animation: deep-in .3s ease both; }
+@keyframes deep-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.deep-error {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 11px 14px; margin: 4px 0 10px;
+  color: #e5533f; font-size: 13px;
+  border: 1px solid rgba(229,83,63,.35); border-radius: var(--radius-xl);
+}
+.deep-error button {
+  flex: none; border: none; background: rgba(229,83,63,.12); color: #e5533f;
+  padding: 4px 12px; border-radius: var(--radius-full); cursor: pointer; font-size: 12px;
+}
+.deep-error button:hover { background: rgba(229,83,63,.2); }
+
+/* ---------- need.md：本文概览统计分层（核心状态 / 内容分类） ---------- */
+.ov-stats { flex-direction: column; gap: 2px; margin-top: 4px; }
+.ov-stats-core { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-stats-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-group-label {
+  font-size: 10px; letter-spacing: 1.5px; color: var(--ink-3);
+  margin: 6px 0 1px;
+}
+.ov-stats-core .ov-stat {
+  font-size: 12.5px; font-weight: 600;
+  background: linear-gradient(135deg, rgba(79,110,247,.14), rgba(139,92,246,.14));
+  box-shadow: inset 0 0 0 1px rgba(79,110,247,.22);
+}
+.ov-stats-cats .ov-stat { font-size: 11px; opacity: .88; }
+.ov-stats-cats .ov-stat b { font-weight: 600; }

@@ -39,10 +39,11 @@
     docIndex: null,       // 本文 Claim Index（U4 概览态）
     mode: 'truth',        // 当前 Tab
     results: {},          // mode -> { result, cached }
-    verified: {},         // claimId -> supportLevel（概览已核实统计）
+    verified: {},         // claimId -> supportLevel（概览"已查看"计数；仅表查看行为，与证据核验结论解耦）
     analyzing: false,
     seq: 0,               // 丢弃过期响应（连续深读时旧响应作废）
-    reqSeq: 0             // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
+    reqSeq: 0,            // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
+    deepRead: { seq: 0, busy: false, lastConcept: null, treeNames: [] } // V3.1：求深·上下文深读状态
   };
 
   var CLAIM_TYPE_NAMES = { fact: '事实', number: '数字', causal: '因果', compare: '比较', predict: '预测', define: '定义', person: '人物事件', other: '其他', opinion: '观点' };
@@ -419,10 +420,8 @@
     return e;
   }
 
-  var SUPPORT_BADGES = {
-    supported: '✓ 有较充分证据支持', partial: '🟡 部分支持',
-    insufficient: '⚠️ 证据不足', unsupported: '✕ 不支持', opinion: '◎ 观点表达'
-  };
+  // need.md：本界面不再向用户展示"有较充分证据支持"等证据充分度标签。
+  // 证据检索/评分/来源分析等系统内部能力保持不动；此 map 原为这些废弃 UI 标签服务，已删除。
 
   function cardWith(label) {
     var c = el('div', 'card glass');
@@ -453,7 +452,6 @@
     var wrapper = el('div', 'net-wrap');
     // —— 结论节点 ——
     var concl = el('div', 'net-conclusion');
-    concl.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
     concl.appendChild(el('div', 'net-conclusion-text', esc(model.summary || result.summary || '')));
     // 数字绑定总览：结论声称的数字 vs 支持证据中实际找到的
     if (model.claimedTokens.length) {
@@ -544,8 +542,7 @@
   function renderTruth(result, entry) {
     var pane = els.panes.truth;
     pane.innerHTML = '';
-    var c1 = cardWith('支持程度');
-    c1.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
+    var c1 = cardWith('摘要');
     c1.appendChild(el('div', 'summary-text', esc(result.summary)));
     // V2.5：策略与证据统计行（问题类型/引擎/独立证据数）+ upgrade.md Binding 状态
     var st = entry && entry.verification && entry.verification.strategy;
@@ -664,20 +661,151 @@
     pane.appendChild(c3);
   }
 
-  // ---------- 探索循环（PRD 04 §8 / 05 §14.3）：知识节点点击 → 成为新 Claim 重新三连探索 ----------
+  // ---------- V3.1：上下文深读（add.md §4~§19） ----------
+  // concept 是被深读的对象，context（当前 Claim/文章）是决定如何深读它的关键。
+  // 点击关键词：只局部更新求深内容区 —— 不换 Claim、不刷整页、保留其它关键词；
+  // 竞态由 deepRead.seq 保证：只有最后一次点击对应的请求能写结果。
 
-  function exploreNode(text) {
-    var t = String(text || '').trim();
-    if (!t || !state.claimPayload) return;
-    showClaim({
-      title: String(state.claimPayload.title || '').replace(/ · 知识探索$/, '') + ' · 知识探索',
-      url: state.claimPayload.url,
-      selectedText: t,
-      capturedAt: new Date().toISOString()
+  // 组装"深读某概念"的请求文本：把概念放回当前阅读语境
+  function deepKeywordText(concept) {
+    var cp = state.claimPayload || {};
+    return [
+      '【用户当前阅读的内容】',
+      String(cp.selectedText || ''),
+      cp.title ? ('【文章标题】' + String(cp.title)) : '',
+      '【深读目标概念】' + String(concept || '').trim(),
+      '',
+      '请把概念「' + String(concept || '').trim() + '」放回上述阅读语境中深读，输出：',
+      '1) 该概念的基本含义；2) 它在当前内容中对应的具体人物/事件/机构/对象（能确定才写，不能确定就如实说明）；',
+      '3) 它在此语境中的作用、意义或影响；4) 为什么这个概念会出现在当前内容的知识树中。',
+      '结论必须紧扣当前内容，禁止输出脱离语境的百科式定义。'
+    ].join('\n');
+  }
+
+  // 收集一次整篇求深结果里的全部关键词（根/分支节点/概念名），供"继续探索"复用
+  function conceptNamesFromDeep(result) {
+    var names = [];
+    var seen = {};
+    function add(n) {
+      n = String(n || '').trim();
+      if (n && !seen[n]) { seen[n] = true; names.push(n); }
+    }
+    var tree = (result && result.tree) || {};
+    if (tree.root) add(tree.root);
+    (Array.isArray(tree.branches) ? tree.branches : []).forEach(function (br) {
+      if (br && br.label) add(br.label);
+      (Array.isArray(br.nodes) ? br.nodes : []).forEach(function (n) { add(n); });
     });
+    (Array.isArray(result && result.concepts) ? result.concepts : []).forEach(function (c) { add(c && c.name); });
+    return names;
+  }
+
+  // 可点击关键词 chip（深读入口；交互状态由 .loading/.visited/.selected 表达，无 ↗）
+  function makeKeywordChip(name, cls) {
+    var chip = el('span', 'node-chip' + (cls ? ' ' + cls : ''), esc(name));
+    chip.title = '结合当前内容深读此概念';
+    chip.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      deepReadNode(name);
+    });
+    return chip;
+  }
+
+  // "继续探索"关键词组（当前已读概念除外）
+  function renderExploreChips(container, exclude) {
+    var names = (state.deepRead.treeNames || []).filter(function (n) { return n !== exclude; });
+    if (!names.length) return;
+    var wrap = el('div', 'tree-nodes');
+    names.forEach(function (n) { wrap.appendChild(makeKeywordChip(n)); });
+    container.appendChild(wrap);
+  }
+
+  // 上下文深读主入口：发求深请求 → 局部更新求深区
+  function deepReadNode(concept) {
+    var t = String(concept || '').trim();
+    if (!t || !state.claimPayload || state.mode !== 'deep') return;
+    var seq = ++state.deepRead.seq;
+    state.deepRead.lastConcept = t;
+    state.deepRead.busy = true;
+    renderDeepLoading(t);
+    var payload = Object.assign({}, state.claimPayload, { selectedText: deepKeywordText(t) });
+    chrome.runtime.sendMessage(
+      { type: WCC_MSG.ANALYZE, mode: 'deep', payload: payload },
+      function (resp) {
+        void chrome.runtime.lastError;
+        if (seq !== state.deepRead.seq || state.mode !== 'deep' || !state.claimPayload) return; // 过期/已切走：丢弃
+        state.deepRead.busy = false;
+        if (resp && resp.ok && resp.analysis && resp.analysis.result) {
+          renderDeepConceptResult(t, resp.analysis.result);
+        } else {
+          renderDeepConceptError(t, (resp && resp.reason) || 'no_response');
+        }
+      }
+    );
+  }
+
+  // 求深局部：加载态（旧内容让位给轻量 spinner）
+  function renderDeepLoading(concept) {
+    var pane = els.panes.deep;
+    pane.innerHTML = '';
+    var row = el('div', 'deep-loading');
+    row.appendChild(el('span', 'spinner', ''));
+    row.appendChild(el('span', '', '正在结合当前内容分析「' + esc(concept) + '」……'));
+    pane.appendChild(row);
+  }
+
+  // 求深局部：新深读结果（淡入），底部保留其它关键词继续探索
+  function renderDeepConceptResult(concept, result) {
+    var pane = els.panes.deep;
+    pane.innerHTML = '';
+    var live = el('div', 'deep-fade');
+    var cHead = cardWith('深读：' + esc(concept));
+    cHead.appendChild(el('div', 'tree-root', '结合当前阅读语境'));
+    live.appendChild(cHead);
+    if (result && result.principle) {
+      var cB = cardWith('基本定义与当前语境');
+      cB.appendChild(el('div', 'summary-text', esc(result.principle)));
+      live.appendChild(cB);
+    }
+    var concepts = Array.isArray(result && result.concepts) ? result.concepts : [];
+    if (concepts.length) {
+      var cC = cardWith('相关概念');
+      concepts.forEach(function (cp) {
+        var line = el('div', 'concept-line');
+        line.appendChild(makeKeywordChip(cp && cp.name));
+        line.appendChild(el('span', 'muted', esc(cp && cp.description)));
+        cC.appendChild(line);
+      });
+      live.appendChild(cC);
+    }
+    var cD = cardWith('继续探索');
+    renderExploreChips(cD, concept);
+    live.appendChild(cD);
+    pane.appendChild(live);
+  }
+
+  // 求深局部：失败 → 恢复整篇视图 + 顶部错误条，可重试，不空白
+  function renderDeepConceptError(concept, reason) {
+    var pane = els.panes.deep;
+    if (state.results.deep && state.results.deep.result) {
+      renderDeep(state.results.deep.result);
+    } else {
+      pane.innerHTML = '';
+    }
+    var box = el('div', 'deep-error');
+    box.appendChild(el('span', '', '「' + esc(concept) + '」深读失败' +
+      (reason && reason !== 'no_response' ? '（' + esc(reason) + '）' : '') + '，请重试。'));
+    var retry = el('button', '', '重试');
+    retry.addEventListener('click', function () { deepReadNode(concept); });
+    box.appendChild(retry);
+    pane.insertBefore(box, pane.firstChild);
   }
 
   function renderDeep(result) {
+    // 整篇求深视图：作废在途局部深读请求并记录原始关键词（供"继续探索"恢复）
+    state.deepRead.seq++;
+    state.deepRead.busy = false;
+    state.deepRead.treeNames = conceptNamesFromDeep(result);
     var pane = els.panes.deep;
     pane.innerHTML = '';
     var c1 = cardWith('背后的原理');
@@ -689,7 +817,7 @@
       var c2 = cardWith('相关概念');
       concepts.forEach(function (cp) {
         var line = el('div', 'concept-line');
-        line.appendChild(el('span', 'concept-name', esc(cp.name)));
+        line.appendChild(makeKeywordChip(cp.name));
         line.appendChild(el('span', 'muted', esc(cp.description)));
         c2.appendChild(line);
       });
@@ -699,16 +827,15 @@
     var tree = result.tree || {};
     var c3 = cardWith('知识树');
     if (tree.root) {
-      c3.appendChild(el('div', '', '')).appendChild(el('span', 'tree-root', esc(tree.root)));
+      var rootLine = el('div', '');
+      rootLine.appendChild(el('span', 'tree-root', esc(tree.root)));
+      c3.appendChild(rootLine);
       (Array.isArray(tree.branches) ? tree.branches : []).forEach(function (br) {
         var branch = el('div', 'tree-branch');
         branch.appendChild(el('div', 'tree-label', esc(br.label)));
         var nodesWrap = el('div', 'tree-nodes');
         (Array.isArray(br.nodes) ? br.nodes : []).forEach(function (n) {
-          var chip = el('span', 'node-chip', esc(n));
-          chip.title = '以此节点继续深读';
-          chip.addEventListener('click', function () { exploreNode(n); });
-          nodesWrap.appendChild(chip);
+          nodesWrap.appendChild(makeKeywordChip(n));
         });
         branch.appendChild(nodesWrap);
         c3.appendChild(branch);
@@ -720,7 +847,7 @@
 
     var qs = Array.isArray(result.questions) ? result.questions : [];
     if (qs.length) {
-      var c4 = cardWith('继续探索');
+      var c4 = cardWith('相关问题（点击复制）');
       var ul = el('ul', 'q-list');
       qs.forEach(function (q) {
         var li = el('li', 'q-link', esc(q));
@@ -786,27 +913,37 @@
     var objectStats = index.objectStats || {};
     els.ovTitle.textContent = di.title || '本文';
     els.ovStats.innerHTML = '';
-    // v2：信息对象分布统计（升级要求 §2）+ 已核实计数
-    var stats = [
-      { label: '可溯源声明', n: claims.length, cls: '' },
-      { label: '已核实', n: Object.keys(state.verified).length, cls: '' }
+    // need.md：概览统计分两层 —— 核心状态（可溯源声明/已查看）与内容分类，避免全部同权平铺。
+    // "已查看"只表达用户查看行为，数字逻辑沿用原"已核实"计数（state.verified 内部键名保留）。
+    var coreStats = [
+      { label: '可溯源声明', n: claims.length },
+      { label: '已查看', n: Object.keys(state.verified).length }
     ];
+    var catStats = [];
     Object.keys(objectStats).forEach(function (ot) {
-      if (objectStats[ot] > 0) stats.push({ label: OBJECT_TYPE_NAMES[ot] || ot, n: objectStats[ot], cls: '' });
+      if (objectStats[ot] > 0) catStats.push({ label: OBJECT_TYPE_NAMES[ot] || ot, n: objectStats[ot] });
     });
-    stats.forEach(function (s) {
+    function statSpan(s) {
       var span = el('span', 'ov-stat');
       span.innerHTML = esc(s.label) + ' <b>' + s.n + '</b>';
-      els.ovStats.appendChild(span);
-    });
+      return span;
+    }
+    var coreRow = el('div', 'ov-stats-core');
+    coreStats.forEach(function (s) { coreRow.appendChild(statSpan(s)); });
+    els.ovStats.appendChild(coreRow);
+    if (catStats.length) {
+      els.ovStats.appendChild(el('div', 'ov-group-label', '内容分类'));
+      var catRow = el('div', 'ov-stats-cats');
+      catStats.forEach(function (s) { catRow.appendChild(statSpan(s)); });
+      els.ovStats.appendChild(catRow);
+    }
     els.ovList.innerHTML = '';
     claims.forEach(function (claim) {
       var item = el('button', 'ov-item glass');
       var head = el('div', 'ov-item-head');
       head.appendChild(el('span', 'ov-type', CLAIM_TYPE_NAMES[claim.type] || '声明'));
       head.appendChild(el('span', 'ov-obj', OBJECT_TYPE_NAMES[claim.objectType] || ''));
-      var v = state.verified[claim.id];
-      if (v) head.appendChild(el('span', 'ov-verified', SUPPORT_BADGES[v] || v));
+      // need.md：概览/列表不展示证据支持状态；"已查看"仅以顶部统计数字表达，与证据核验结论解耦
       item.appendChild(head);
       item.appendChild(el('div', 'ov-text', esc(claim.text)));
       item.addEventListener('click', function () {
@@ -858,6 +995,7 @@
       state.results = {};   // 新 Claim 清空三模式缓存结果
       state.analyzing = false;
       state.seq++;          // 作废在途响应
+      state.deepRead.seq++; state.deepRead.busy = false; state.deepRead.lastConcept = null; state.deepRead.treeNames = []; // 作废在途局部深读
     }
 
     var text = String(payload.selectedText || '');

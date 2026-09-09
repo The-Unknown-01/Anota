@@ -14,7 +14,7 @@
 
   var orb = null;
   var badge = null;
-  var spin = null;
+  var arc = null;    // 雷达探针外圈（A 透镜 + B 探针）
   var label = null;
 
   // ---------- DOM ----------
@@ -31,20 +31,24 @@
       'width: 84px', 'height: 84px', 'border-radius: 50%', 'box-sizing: border-box', // O2：42px → 84px
       'display: flex', 'align-items: center', 'justify-content: center',
       'cursor: pointer', 'user-select: none',
-      'font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
-      'font-size: 30px', 'font-weight: 700', 'color: #4f6ef7',            // O2：16px → 30px
-      'background: rgba(250,250,253,.72)',
-      'backdrop-filter: blur(10px)', '-webkit-backdrop-filter: blur(10px)',
-      'border: 1px solid rgba(255,255,255,.8)',
-      'box-shadow: 0 4px 18px rgba(30,40,80,.16)',
-      'transition: transform .25s ease, box-shadow .25s ease, opacity .25s ease',
-      'opacity: .55'
+      // A·透镜：衬线"求"字 + 品牌渐变墨色（由 label 应用），字体走系统衬线栈
+      'font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", serif',
+      'font-size: 27px', 'font-weight: 700',
+      // A·玻璃透镜：左上径向高光 + 靛蓝→紫的浅玻璃渐变（状态色由 setState 覆盖同构渐变）
+      'background: radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(224,230,255,.55) 60%, rgba(197,206,255,.42))',
+      'backdrop-filter: blur(12px)', '-webkit-backdrop-filter: blur(12px)',
+      'border: 1px solid rgba(255,255,255,.9)',
+      'box-shadow: 0 8px 22px rgba(40,50,120,.18), inset 0 1px 6px rgba(255,255,255,.85)',
+      'transition: transform .25s ease, box-shadow .3s ease, opacity .25s ease',
+      'opacity: .5'
     ].join(';');
 
-    // 标签（唯一文本载体，避免 textContent 赋值清掉兄弟节点）
+    // 标签（"求"）：品牌渐变墨色（background-clip: text；错误态在 setState 覆盖为纯色 !）
     label = document.createElement('span');
     label.textContent = '求';
-    label.style.cssText = 'position: relative; z-index: 1; line-height: 1;';
+    label.style.cssText = 'position: relative; z-index: 1; line-height: 1;' +
+      'background: linear-gradient(180deg, #5b6cf0 0%, #8b5cf6 100%);' +
+      '-webkit-background-clip: text; background-clip: text; color: transparent;';
     orb.appendChild(label);
 
     badge = document.createElement('div');
@@ -58,19 +62,23 @@
     ].join(';');
     orb.appendChild(badge);
 
-    spin = document.createElement('div');
-    spin.style.cssText = [
-      'position: absolute', 'inset: 0', 'border-radius: 50%',
-      'border: 2px solid rgba(79,110,247,.18)', 'border-top-color: #4f6ef7',
-      'display: none', 'animation: qiuzhen-spin .8s linear infinite'
+    // B·雷达探针：外圈一段"扫描弧"（conic-gradient 勾亮 ~120°，其余透明；分析时整环旋转扫描）
+    arc = document.createElement('div');
+    arc.style.cssText = [
+      'position: absolute', 'inset: -3px', 'border-radius: 50%', 'pointer-events: none',
+      'background: conic-gradient(from -90deg, #5b6cf0 0deg 120deg, rgba(91,108,240,0) 124deg 360deg)',
+      '-webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px))',
+      'mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px))',
+      'opacity: .35', 'transition: opacity .25s ease'
     ].join(';');
-    orb.appendChild(spin);
+    orb.appendChild(arc);
 
-    // 动画 keyframes 注入一次
+    // 动画 keyframes 注入一次（B·雷达扫描 + 就绪脉冲）
     if (!document.getElementById('qiuzhen-spin-style')) {
       var st = document.createElement('style');
       st.id = 'qiuzhen-spin-style';
-      st.textContent = '@keyframes qiuzhen-spin { to { transform: rotate(360deg); } }';
+      st.textContent = '@keyframes qiuzhen-sweep { to { transform: rotate(360deg); } }' +
+        '@keyframes qiuzhen-pulse { from { box-shadow: 0 0 0 0 rgba(47,158,99,.5); } to { box-shadow: 0 0 0 14px rgba(47,158,99,0); } }';
       document.documentElement.appendChild(st);
     }
 
@@ -134,17 +142,25 @@
   function setState(s, detail) {
     state = s;
     if (!orb) ensureOrb();
-    spin.style.display = s === STATE.ANALYZING ? 'block' : 'none';
-    orb.style.transform = s === STATE.ANALYZING ? 'scale(1)' : 'scale(1)';
+    // B·雷达探针：分析中整环扫描，其余静止
+    arc.style.animation = s === STATE.ANALYZING ? 'qiuzhen-sweep 1.1s linear infinite' : 'none';
+    arc.style.opacity = (s === STATE.IDLE || s === STATE.ERROR) ? '.35' : '.9';
+    arc.style.background = s === STATE.ERROR
+      ? 'conic-gradient(from -90deg, #e05c4f 0deg 120deg, rgba(224,92,79,0) 124deg 360deg)'
+      : 'conic-gradient(from -90deg, #5b6cf0 0deg 120deg, rgba(91,108,240,0) 124deg 360deg)';
+    orb.style.animation = 'none'; // 清上一次 ready 脉冲
+    orb.style.transform = 'scale(1)';
     orb.title = s === STATE.IDLE ? '求真 · 分析本文声明'
       : s === STATE.ANALYZING ? '正在分析本文…'
       : s === STATE.READY ? '发现 ' + (detail || 0) + ' 个可验证声明，点击查看'
       : '分析失败，点击重试';
 
     if (s === STATE.READY) {
-      orb.style.background = 'rgba(240,255,248,.86)';
-      orb.style.borderColor = 'rgba(47,158,99,.5)';
-      orb.style.color = '#1e7a47';
+      // 透镜转薄荷态 + 一次柔和呼吸脉冲
+      orb.style.background = 'radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(214,250,232,.62) 60%, rgba(176,240,205,.4))';
+      orb.style.borderColor = 'rgba(47,158,99,.55)';
+      orb.style.boxShadow = '0 8px 22px rgba(47,158,99,.22), inset 0 1px 6px rgba(255,255,255,.85)';
+      orb.style.animation = 'qiuzhen-pulse .55s ease-out 1';
       label.textContent = '求';
       badge.textContent = String(detail || 0);
       badge.style.display = 'block';
@@ -153,19 +169,24 @@
         if (window.__QIUZHEN_HOVER__) window.__QIUZHEN_HOVER__.activate(lastIndex, lastDocMeta);
       } catch (e) { /* hover 层失败不阻塞悬浮球 */ }
     } else if (s === STATE.ERROR) {
-      orb.style.background = 'rgba(255,244,242,.86)';
+      orb.style.background = 'radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(255,236,232,.6) 60%, rgba(255,206,198,.42))';
       orb.style.borderColor = 'rgba(207,75,60,.5)';
-      orb.style.color = '#cf4b3c';
+      orb.style.boxShadow = '0 8px 22px rgba(207,75,60,.18), inset 0 1px 6px rgba(255,255,255,.85)';
       label.textContent = '!';
+      label.style.cssText = 'position: relative; z-index: 1; line-height: 1; color: #cf4b3c;';
       badge.style.display = 'none';
     } else {
-      orb.style.background = 'rgba(250,250,253,.72)';
-      orb.style.borderColor = 'rgba(255,255,255,.8)';
-      orb.style.color = '#4f6ef7';
+      // idle / analyzing：玻璃透镜常态 + 渐变墨色"求"
+      orb.style.background = 'radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(224,230,255,.55) 60%, rgba(197,206,255,.42))';
+      orb.style.borderColor = 'rgba(255,255,255,.9)';
+      orb.style.boxShadow = '0 8px 22px rgba(40,50,120,.18), inset 0 1px 6px rgba(255,255,255,.85)';
       label.textContent = '求';
+      label.style.cssText = 'position: relative; z-index: 1; line-height: 1;' +
+        'background: linear-gradient(180deg, #5b6cf0 0%, #8b5cf6 100%);' +
+        '-webkit-background-clip: text; background-clip: text; color: transparent;';
       badge.style.display = 'none';
     }
-    if (s === STATE.IDLE) orb.style.opacity = '0.55'; else orb.style.opacity = '1';
+    if (s === STATE.IDLE) orb.style.opacity = '0.5'; else orb.style.opacity = '1';
   }
 
   // ---------- 分析流程 ----------
