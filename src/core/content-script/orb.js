@@ -73,33 +73,34 @@
     ].join(';');
     orb.appendChild(arc);
 
-    // 下半部"几何波浪"装饰：几道错落的渐变波带互相叠色，制造流动感（纯装饰，不拦截事件）
+    // 下半部"几何波浪"装饰：铺满整球 + 圆角裁剪（内容永不出圆），波浪占下约 45%
     (function () {
       var NS = 'http://www.w3.org/2000/svg';
       var svg = document.createElementNS(NS, 'svg');
-      svg.setAttribute('viewBox', '0 0 84 40');
+      svg.setAttribute('viewBox', '0 0 84 84');
       svg.setAttribute('preserveAspectRatio', 'none');
       svg.setAttribute('aria-hidden', 'true');
       svg.style.cssText = [
-        'position: absolute', 'left: 0', 'bottom: -1px', 'width: 100%', 'height: 38%',
-        'display: block', 'pointer-events: none', 'z-index: 0', 'overflow: visible'
+        'position: absolute', 'inset: 0', 'width: 100%', 'height: 100%',
+        'display: block', 'pointer-events: none', 'z-index: 0',
+        'border-radius: 50%', 'overflow: hidden'
       ].join(';');
       svg.innerHTML = '' +
         '<defs>' +
-        '<linearGradient id="qzw1" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0" stop-color="#5b6cf0" stop-opacity=".9"/><stop offset=".55" stop-color="#5b6cf0" stop-opacity=".45"/><stop offset="1" stop-color="#4f6ef7" stop-opacity=".12"/></linearGradient>' +
-        '<linearGradient id="qzw2" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0" stop-color="#8b5cf6" stop-opacity=".9"/><stop offset=".55" stop-color="#8b5cf6" stop-opacity=".45"/><stop offset="1" stop-color="#7c3aed" stop-opacity=".12"/></linearGradient>' +
-        '<linearGradient id="qzw3" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0" stop-color="#e879b9" stop-opacity=".85"/><stop offset=".55" stop-color="#e879b9" stop-opacity=".42"/><stop offset="1" stop-color="#f0abfc" stop-opacity=".1"/></linearGradient>' +
+        '<linearGradient id="qzw1" gradientUnits="userSpaceOnUse" x1="0" y1="46" x2="0" y2="84">' +
+        '<stop offset="0" stop-color="#5b6cf0" stop-opacity=".95"/><stop offset=".5" stop-color="#5b6cf0" stop-opacity=".55"/><stop offset="1" stop-color="#4f6ef7" stop-opacity=".15"/></linearGradient>' +
+        '<linearGradient id="qzw2" gradientUnits="userSpaceOnUse" x1="0" y1="56" x2="0" y2="84">' +
+        '<stop offset="0" stop-color="#8b5cf6" stop-opacity=".95"/><stop offset=".5" stop-color="#8b5cf6" stop-opacity=".55"/><stop offset="1" stop-color="#7c3aed" stop-opacity=".15"/></linearGradient>' +
+        '<linearGradient id="qzw3" gradientUnits="userSpaceOnUse" x1="0" y1="66" x2="0" y2="84">' +
+        '<stop offset="0" stop-color="#e879b9" stop-opacity=".9"/><stop offset=".5" stop-color="#e879b9" stop-opacity=".5"/><stop offset="1" stop-color="#f0abfc" stop-opacity=".12"/></linearGradient>' +
         '</defs>' +
-        // 后层 → 前层：每道波带 = 渐变填充 + 一道同色细描线（几何线条感）
-        '<path d="M0 13 C 9 6, 18 6, 27 11 S 45 18, 54 12 S 72 6, 84 10 L 84 40 L 0 40 Z" fill="url(#qzw1)"/>' +
-        '<path d="M0 13 C 9 6, 18 6, 27 11 S 45 18, 54 12 S 72 6, 84 10" fill="none" stroke="#7f92ff" stroke-width="1.1" opacity=".55"/>' +
-        '<path d="M0 20 C 10 13, 24 12, 33 17 S 57 25, 68 19 S 80 16, 84 19 L 84 40 L 0 40 Z" fill="url(#qzw2)"/>' +
-        '<path d="M0 20 C 10 13, 24 12, 33 17 S 57 25, 68 19 S 80 16, 84 19" fill="none" stroke="#a78bfa" stroke-width="1.1" opacity=".5"/>' +
-        '<path d="M0 27 C 12 21, 25 20, 36 24 S 60 31, 72 25 S 80 24, 84 26 L 84 40 L 0 40 Z" fill="url(#qzw3)"/>' +
-        '<path d="M0 27 C 12 21, 25 20, 36 24 S 60 31, 72 25 S 80 24, 84 26" fill="none" stroke="#f0a6d8" stroke-width="1.1" opacity=".5"/>';
+        // 后层 → 前层：波峰约从 y=50（球高一半处）起逐层下压到球底；填充 + 同色细描线
+        '<path d="M0 52 C 12 44, 24 44, 34 50 S 56 62, 66 55 S 78 50, 84 54 L 84 84 L 0 84 Z" fill="url(#qzw1)"/>' +
+        '<path d="M0 52 C 12 44, 24 44, 34 50 S 56 62, 66 55 S 78 50, 84 54" fill="none" stroke="#8f9dff" stroke-width="1.1" opacity=".6"/>' +
+        '<path d="M0 62 C 12 54, 27 53, 37 59 S 59 72, 71 64 S 81 59, 84 62 L 84 84 L 0 84 Z" fill="url(#qzw2)"/>' +
+        '<path d="M0 62 C 12 54, 27 53, 37 59 S 59 72, 71 64 S 81 59, 84 62" fill="none" stroke="#b0a0fa" stroke-width="1.1" opacity=".55"/>' +
+        '<path d="M0 71 C 14 63, 29 63, 41 69 S 61 81, 73 73 S 81 68, 84 71 L 84 84 L 0 84 Z" fill="url(#qzw3)"/>' +
+        '<path d="M0 71 C 14 63, 29 63, 41 69 S 61 81, 73 73 S 81 68, 84 71" fill="none" stroke="#f4b3de" stroke-width="1.1" opacity=".5"/>';
       orb.appendChild(svg);
     })();
 
