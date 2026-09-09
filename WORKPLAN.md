@@ -259,7 +259,7 @@
 > 依据 `docs/v2.7_UPGRADE.md`（人工改造，2026-08-29~30 两天，提交 `55613f0` + `b49a72b`）。
 > 核心目标：**密钥仅存于云端、扩展零密钥**的安全可移植形态——引入 Cloudflare Workers 透明代理，
 > 分发包不含任何第三方 API 密钥，扩展仅持一个可随时撤销/轮换的访问令牌。
-> 代理源码独立于扩展仓库：`D:\code\2026zhihu_hackathon\qiuzhen-proxy\`（worker.js + wrangler.toml，非 git 仓库）。
+> 代理源码独立于扩展仓库，非 git 仓库。
 
 ## 计划要点（架构变化）
 
