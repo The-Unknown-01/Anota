@@ -340,8 +340,10 @@
     els.loadingSteps.innerHTML = '';
     LOADING_STEPS[state.mode].forEach(function (s, i) {
       var li = document.createElement('li');
-      li.className = i === 0 ? 'doing' : (i === 1 ? 'todo' : 'todo');
-      li.textContent = s;
+      // 复用求真剧场同款 icon 体系：呼吸闪光点(.stage-dot) + 旋转半球(◐) + 完成勾(✓)
+      li.className = 'stage ' + (i === 0 ? 'doing' : 'todo');
+      li.appendChild(el('span', 'stage-dot'));
+      li.appendChild(el('span', 'stage-name', s));
       els.loadingSteps.appendChild(li);
     });
     // 分步推进的视觉节奏（真实进度不可知，但状态可感知）
@@ -1112,6 +1114,7 @@
   var authCancel = document.getElementById('auth-cancel');
   var authError = document.getElementById('auth-error');
   var authHint = document.getElementById('auth-hint');
+  var suppressAuthAutoOpen = false; // 手动提交/登出后抑制 refreshAuthState 的自动弹层（修复：登录成功窗口不自动关）
 
   function renderAuth(state) {
     if (!authArea) return;
@@ -1130,7 +1133,10 @@
       if (resp && resp.ok) {
         renderAuth(resp.state);
         // V2.8：PROXY 未登录且无 Claim 工作台（悬浮球引导路径）→ 自动展开登录弹层
-        if (resp.state && resp.state.mode === 'proxy' && !resp.state.loggedIn && !state.claimPayload) {
+        // 修复：手动登录成功后的一段时间内不再自动弹回（等真实登录态生效）
+        if (suppressAuthAutoOpen) {
+          suppressAuthAutoOpen = false;
+        } else if (resp.state && resp.state.mode === 'proxy' && !resp.state.loggedIn && !state.claimPayload) {
           openAuthPanel();
         }
       } else renderAuth(null);
@@ -1140,6 +1146,7 @@
   // V2.8：展开登录弹层（悬浮球/API 被门禁拦截时引导登录）
   function openAuthPanel() {
     if (!authPanel) return;
+    suppressAuthAutoOpen = false; // 手动展开视为用户主动，后续允许自动展开
     if (authHint) authHint.hidden = true;
     authPanel.hidden = false;
     authError.hidden = true;
@@ -1165,7 +1172,9 @@
         void chrome.runtime.lastError;
         authSubmit.disabled = false;
         if (resp && resp.ok) {
+          suppressAuthAutoOpen = true; // 登录成功：先隐藏并抑制刷新回包再弹回
           authPanel.hidden = true;
+          authInput.blur();
           refreshAuthState();
           // V2.8：登录成功后自动重触发当前分析（面板刚被拦截的路径）
           if (state.claimPayload && !state.analyzing) {
