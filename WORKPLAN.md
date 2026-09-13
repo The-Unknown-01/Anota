@@ -22,6 +22,7 @@
 - [V2.8 · 登录门禁（升级计划 + 执行记录）](#v28--登录门禁邀请码--jwt)
 - [V2.9 · 检索算法闭环（algorizm_fix 分支）](#v29--检索算法闭环algorizm_fix-分支)
 - [V3.0 · 可视化动态交互（规划 + 执行记录）](#v30--可视化动态交互规划--执行记录)
+- [V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 待审批）](#v31--知乎官方-oauth-登录迁移升级计划--待审批)
 - [已知环境问题](#已知环境问题)
 - [遗留事项](#遗留事项)
 
@@ -312,7 +313,7 @@
 
 - 回归冒烟：`node scripts/smoke-search-advise.js` → **45/45 PASS**
 - 语法校验：7 个改动文件 node --check 全过
-- 零密钥确认：`grep -cE "sk-ca0c|mk-6DCB|e673c367|64e12d23" src/core/generated-config.js` → **0**
+- 零密钥确认：敏感凭证前缀扫描 → **0 命中**（具体值不记录于 WORKPLAN）
 - 当前环境：generated-config.js 为 PROXY 模式（https://api.anota.best，零密钥）
 - 浏览器端到端与 Worker 联调：待人工实测（见遗留）
 
@@ -327,6 +328,10 @@
 > 知乎 OAuth 面向「三方登录 + 获取授权用户个人信息」，与"仅作为登录门槛"的需求不匹配（申请需人工邮件审批、
 > 授权范围是邮箱/手机/公开内容、access_token 仅 1h 有效且无 refresh_token），故改用邀请码 + JWT。
 > **（本计划待审批）**
+>
+> **后续演进说明（2026-09-06）**：本节保留为 V2.8 已交付历史，不回写或抹除。根据更新后的
+> `zhihu-skill` OAuth 联调基线，邀请码入口拟由 V3.1 的「知乎官方 OAuth → 应用会话 JWT」替代。
+> V3.1 尚待审批，当前邀请码能力仍是运行中的登录方式。
 
 ## O-0 · 架构解读
 
@@ -567,6 +572,164 @@ V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
 | M2 | 待执行 | 动效细化 + 超时干预 + 求深求异适配 | — |
 
 > 浏览器端 UI 人工验收待做（同 v2.0 起 Chrome 151 限制）：加载扩展 → 求真一次，确认剧场动效流畅、候选渐进点亮、细节展开符合 V1 决策。
+
+---
+
+# V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 待审批）
+
+> 依据：仓库内更新后的 `zhihu-skill/SKILL.md`、`zhihu-skill/references/oauth-introduction.md`、
+> `zhihu-skill/references/oauth-boundary.md` 及 OAuth Hello World 参考实现。
+> 目标：将 V2.8 的「输入邀请码 → Worker 自签 JWT」改为「用户亲自完成知乎官方授权 → Worker 建立应用会话」，
+> 同时保持 V2.7 已有的 API 密钥隔离与 V2.8 的强制门禁语义。
+> **本节仅为计划；未获审批前不修改认证代码、不部署 Worker、不读取或使用 OAuth 配置密钥。**
+
+## 3.1.1 · 方案结论与边界
+
+### 为什么现在可以重启 OAuth 方案
+
+2026-08-31 放弃 OAuth，是因为当时只掌握「OAuth 用于三方登录/用户数据」这一产品定位，且协议资料不完整。
+本次 `zhihu-skill` 更新给出了可执行的黑客松联调基线：授权地址、code 交换 Token、双凭证用户 API 调用方式、
+公网 HTTPS 回调要求与五项用户接口验收。因此，若产品目标从「匿名门槛」升级为「知乎账号登录」，OAuth 与需求重新匹配。
+
+### 必须保留的协议边界
+
+- OAuth 仅能在部署后的**公网 HTTPS 回调**完成；`localhost` / `127.0.0.1` 只能预览 UI。
+- 用户必须亲自点击知乎授权页的最终确认按钮；扩展或 Agent 不代点。
+- 回调参数优先读取 `authorization_code`，兼容 `code`；换 Token 表单字段仍为 `code`。
+- 实测回调可能不返回 `state`：有 state 时必须 timing-safe 校验；没有 state 时只能标记「黑客松临时联调」，不得宣称生产安全。
+- 当前协议没有 PKCE、scope、refresh token、撤销、解绑或拒绝授权流程；OAuth Token 过期后只能重新授权。
+- `/user` 没有正式响应 schema：昵称/头像获取失败不得伪造，也不得阻断登录门禁或正式用户接口。
+- 用户 API 需要同时发送：`Authorization: Bearer <开放平台 Access Secret>` 与
+  `X-OAuth-Token: <用户 OAuth access_token>`；`app_key` 不是 Access Secret，也不是 X-OAuth-Token。
+
+## 3.1.2 · 推荐架构
+
+```text
+扩展 Side Panel
+  │ ① 点击「使用知乎账号登录」
+  ▼
+Cloudflare Worker /auth/zhihu/start
+  │ ② 生成随机 state + 一次性 flow_id，写入短期服务端状态
+  │ ③ 302 → https://openapi.zhihu.com/authorize
+  ▼
+知乎官方授权页（用户本人确认）
+  │ ④ callback?authorization_code=...&state=...
+  ▼
+Worker /auth/zhihu/callback
+  │ ⑤ 用 app_id + app_key 在后端换 OAuth access_token
+  │ ⑥ OAuth Token 仅保存在服务端会话；可选尝试 /user 获取展示资料
+  │ ⑦ 向扩展签发「应用会话 JWT」（不把 OAuth Token 下发给扩展）
+  ▼
+扩展 chrome.storage.local：仅保存应用会话 JWT + 展示态
+  │ ⑧ 业务请求 Authorization: Bearer <应用会话 JWT>
+  ▼
+Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
+```
+
+关键决策：**知乎 OAuth Token 与应用会话 JWT 分层**。OAuth Token 代表知乎用户，只留服务端；扩展只持本项目的
+短期会话 JWT。这样现有 `guardApi()`、`isApiAllowed()`、`proxyAuthHeader()` 和业务代理路由可以最小改动复用，
+也避免把具有用户数据权限的 OAuth Token 暴露给前端。
+
+### OAuth 回调如何回到扩展
+
+推荐使用**短时一次性 flow_id 轮询**，而不是让知乎直接回调 `chrome-extension://`：
+
+1. 扩展调用 `/auth/zhihu/start` 获得 `authorize_url + flow_id`，新标签打开授权页；
+2. 知乎回调固定公网地址 `https://api.anota.best/auth/zhihu/callback`；
+3. Worker 完成换 Token 后，把 flow 标为 authorized；回调页只显示「授权成功，可返回扩展」；
+4. 扩展轮询 `/auth/zhihu/status?flow_id=...`，以一次性 code 领取应用会话 JWT；领取后 flow 立即失效。
+
+该方案不依赖 `chrome.identity.launchWebAuthFlow`，也不要求把扩展动态 ID 登记为回调地址；代价是 Worker 必须有
+短期状态存储。**不能继续使用内存 Map**：Cloudflare Worker 实例不稳定、会冷启动，应使用 KV 或 Durable Object，
+并为 state/flow 设置 5～10 分钟 TTL 与一次性领取语义。
+
+## 3.1.3 · 凭证、Token 与存储矩阵
+
+| 对象 | 作用 | 推荐存储 | 是否下发扩展 |
+|---|---|---|---|
+| `app_id` | 标识知乎第三方应用 | Worker 普通配置/vars | 可公开，但无需下发 |
+| `app_key` | 后端交换 OAuth Token | Worker Secret `ZHIHU_OAUTH_APP_KEY` | **否** |
+| 开放平台 Access Secret | 调知乎通用 API/用户 API 的调用方鉴权 | Worker Secret `ZHIHU_ACCESS_SECRET` | **否** |
+| OAuth 会话 Cookie | 绑定浏览器与服务端会话；HttpOnly/SameSite | 浏览器 Cookie（仅服务端读取） | **否（不转给扩展 JS）** |
+| `authorization_code` | 一次性换 Token | callback 请求内存，用后丢弃 | **否** |
+| 知乎 OAuth access_token | 代表已授权用户；无 refresh token | KV/DO 服务端会话，加密或最小暴露，按 expires_in 过期 | **否** |
+| 应用会话 JWT | 证明该扩展用户已完成知乎授权 | 扩展 `chrome.storage.local` + Worker 验签 | **是** |
+| flow_id/state | 绑定授权发起与回调、抵抗串号 | KV/DO，5～10 分钟 TTL，一次性 | flow_id 是，state 否 |
+
+安全红线：OAuth 配置文件 `zhihu-skill/OAuth配置.key` 与所有 key/token 一律不读入文档、不打印、不提交；
+正式部署只通过 `wrangler secret put` 或 Cloudflare 控制台注入。
+
+## 3.1.4 · 迁移策略（邀请码 → OAuth）
+
+采用**OAuth-only 一次性切换**，不保留邀请码兼容路径、管理员回退或双登录入口：
+
+1. 先新增 OAuth 后端路由、flow 状态存储与扩展 OAuth 登录 UI；
+2. 同一迁移分支内彻底删除 `/auth/redeem`、`/auth/refresh`、`INVITE_CODES`、邀请码输入 UI、批量邀请码文件与相关文档/验证脚本引用；
+3. 保留应用会话 JWT 鉴权层，但 JWT 的唯一签发依据改为「OAuth 会话授权成功」；
+4. 轮换 `JWT_SECRET`，清理 Worker 中静态令牌 fallback 与邀请码 Secrets，使旧邀请码签发的 JWT 立即失效；
+5. OAuth 未完成、取消、拒绝、过期或服务异常时，一律拒绝业务 API，不得回落到邀请码、静态令牌或匿名模式（DIRECT 开发模式除外）。
+
+不建议让业务 API 直接接受知乎 OAuth Token：这会把用户 Token 暴露到扩展，并把业务门禁与知乎用户接口鉴权耦合。
+
+## 3.1.5 · 里程碑与验收
+
+| # | 内容 | 交付效果 | 验收重点 |
+|---|---|---|---|
+| A0 | 凭证与回调前置检查 | 确认 app_id/app_key 已获批；在知乎开放平台登记 `https://api.anota.best/auth/zhihu/callback`；创建 KV/DO | 回调地址完全一致；Secrets 不进入源码/git/日志 |
+| A1 | Worker OAuth 起点 | `/auth/zhihu/start` 创建 flow_id/state，返回 authorize_url；KV/DO TTL | state 随机、单次 flow、过期 flow 拒绝、无 app_key 明文响应 |
+| A2 | Worker callback + 换 Token | callback 兼容 `authorization_code`/`code`；后端请求 `/access_token`；OAuth Token 服务端保存 | 错 state 拒绝；无 state 明示临时联调；code/token 不进日志 |
+| A3 | 应用会话签发 | `/auth/zhihu/status` 一次性领取应用 JWT；业务路由继续校验 JWT | flow 不可重复领取；JWT 带 exp/iss/aud/sub；OAuth Token 从不下发 |
+| A4 | 扩展登录体验 | 邀请码弹层彻底替换为知乎登录引导；打开授权页、轮询状态、成功后显示昵称或「已授权知乎账号」 | 只有 OAuth 成功后 API 放行；取消/拒绝/过期/网络错误均拒绝 API 并有明确反馈；`/user` 失败不阻断 |
+| A5 | 业务与用户接口联调 | 通用搜索仍使用应用级 Access Secret；按产品需要最小调用用户接口 | 双 Header 正确；用户接口默认不采集，只有明确产品用途才调用 |
+| A6 | OAuth-only 收口 | 删除邀请码全链路与 Worker fallback；轮换 JWT_SECRET；清理 INVITE_CODES | 旧邀请码 JWT 立即失效；不存在邀请码入口/路由/Secret；DIRECT 开发模式不受影响；文档同步 |
+| A7 | 回归与发布 | 登录门禁 + 搜索/深读 + V3.0 可视化完整回归，打版本 tag | 未登录零 API、授权后放行、退出/过期重新授权、smoke 45/45、浏览器无 runtime error |
+
+## 3.1.6 · 产品范围建议
+
+本次首要目的只是**用知乎账号完成身份门禁**。虽然 `zhihu-skill` 提供创作、关注、收藏夹、收藏夹内容、近期收藏
+五项用户接口的验收基线，但这些数据与「求真·深读」核心闭环并非必需。建议 V3.1：
+
+- 默认只建立登录身份；`/user` 仅用于昵称/头像展示，失败则显示「已授权知乎账号」。
+- 暂不读取创作/关注/收藏数据，避免为了技术展示扩大数据权限与隐私说明负担。
+- 若后续要做「基于收藏的个性化深读」，另写产品目标、最小数据范围、用户可见用途与删除机制后再审批。
+
+## 3.1.7 · 风险与降级
+
+| 风险 | 影响 | 计划应对 |
+|---|---|---|
+| 回调无 `state` | 无法宣称完整 OAuth CSRF 防护 | UI/日志标为临时联调；不作为生产安全完成项；等待平台补齐 |
+| 无 PKCE | authorization_code 被截获的风险更高 | HTTPS + 极短 flow TTL + code 后端立即交换 + 一次性领取应用 JWT |
+| 无 refresh token | OAuth Token 到期后无法静默续期 | 到期清会话并明确引导重新授权；不伪造刷新能力 |
+| Worker 无稳定内存会话 | 冷启动导致 flow/token 丢失 | KV/DO 持久化短期 flow 与 OAuth 会话；不使用 Map 作为正式实现 |
+| `/user` schema 不稳定 | 昵称/头像展示失败 | 个人资料作为 optional；失败不阻断登录与深读 |
+| 用户 API 权限扩大 | 隐私与信任成本增加 | V3.1 默认不调用五项用户数据接口；确有功能需求再单独审批 |
+| OAuth 平台能力仍属联调基线 | 不能声称生产完备 | 发布说明明确「黑客松联调」，在 state/PKCE/撤销能力补齐前不标 production-ready |
+
+## 3.1.8 · 待审批决策点
+
+| 编号 | 决策 | 建议 |
+|---|---|---|
+| AQ1 | OAuth 回调与扩展会话衔接 | **采用 Worker 公网 callback + flow_id 轮询 + 一次性应用 JWT** |
+| AQ2 | Worker 状态存储 | **KV（MVP）**；若需要强一致一次性领取再升级 Durable Object |
+| AQ3 | OAuth Token 是否下发扩展 | **绝不下发**，只留服务端；扩展仅持应用会话 JWT |
+| AQ4 | 登录方式 | **OAuth-only：彻底删除邀请码机制；只有完成知乎官方 OAuth 授权才能使用功能** |
+| AQ5 | 用户数据范围 | **只做登录身份；/user optional；五项用户接口暂不进入产品功能** |
+| AQ6 | 无 state 时是否允许联调 | **允许黑客松临时联调，但醒目标注非生产安全；正式发布门槛仍不通过** |
+| AQ7 | DIRECT 开发模式 | **保留**，本地开发无需 OAuth；分发的 PROXY 模式强制 OAuth |
+
+**审批门槛（全部满足后才开始 A0）：**
+
+- [x] AQ1～AQ7 已确认（AQ1～AQ3、AQ5～AQ7 按建议；AQ4 已明确改为 OAuth-only）
+- [ ] 已确认知乎开放平台应用凭证确实可用于当前应用，且允许登记公网 HTTPS callback
+- [ ] 接受当前 OAuth 缺少 state（可能）、PKCE、refresh token、撤销/解绑协议，只作为黑客松联调基线
+- [ ] 接受新增 Cloudflare KV/DO 作为短期状态与 OAuth 会话存储
+- [ ] 确认 V3.1 不读取创作/关注/收藏等用户数据，只做登录门禁（除非另行审批）
+
+### 当前实施阻塞项
+
+- **等待回调登记**：请在知乎开发平台填写 `https://api.anota.best/auth/zhihu/callback`。
+- 这是计划中的固定公网 HTTPS 回调地址；在 A1/A2 实现并部署之前，不能声称 OAuth 已打通。
+- 回调地址必须与知乎平台登记值完全一致（协议、域名、路径均一致，不加尾部 `/`）。
 
 ---
 
