@@ -22,7 +22,7 @@
 - [V2.8 · 登录门禁（升级计划 + 执行记录）](#v28--登录门禁邀请码--jwt)
 - [V2.9 · 检索算法闭环（algorizm_fix 分支）](#v29--检索算法闭环algorizm_fix-分支)
 - [V3.0 · 可视化动态交互（规划 + 执行记录）](#v30--可视化动态交互规划--执行记录)
-- [V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 待审批）](#v31--知乎官方-oauth-登录迁移升级计划--待审批)
+- [V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 执行中）](#v31--知乎官方-oauth-登录迁移升级计划--执行中)
 - [已知环境问题](#已知环境问题)
 - [遗留事项](#遗留事项)
 
@@ -331,7 +331,7 @@
 >
 > **后续演进说明（2026-09-06）**：本节保留为 V2.8 已交付历史，不回写或抹除。根据更新后的
 > `zhihu-skill` OAuth 联调基线，邀请码入口拟由 V3.1 的「知乎官方 OAuth → 应用会话 JWT」替代。
-> V3.1 尚待审批，当前邀请码能力仍是运行中的登录方式。
+> V3.1 已获批准并在 `v3.1-oauth-only` 分支执行；在 OAuth-only 收口完成前，线上邀请码能力仍暂时保留。
 
 ## O-0 · 架构解读
 
@@ -575,13 +575,13 @@ V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
 
 ---
 
-# V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 待审批）
+# V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 执行中）
 
 > 依据：仓库内更新后的 `zhihu-skill/SKILL.md`、`zhihu-skill/references/oauth-introduction.md`、
 > `zhihu-skill/references/oauth-boundary.md` 及 OAuth Hello World 参考实现。
 > 目标：将 V2.8 的「输入邀请码 → Worker 自签 JWT」改为「用户亲自完成知乎官方授权 → Worker 建立应用会话」，
 > 同时保持 V2.7 已有的 API 密钥隔离与 V2.8 的强制门禁语义。
-> **本节仅为计划；未获审批前不修改认证代码、不部署 Worker、不读取或使用 OAuth 配置密钥。**
+> **本节已获批准；按 A0→A7 顺序执行。OAuth 配置密钥仍只在需要时安全读取，不打印、不入库。**
 
 ## 3.1.1 · 方案结论与边界
 
@@ -675,7 +675,7 @@ Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
 
 | # | 内容 | 交付效果 | 验收重点 |
 |---|---|---|---|
-| A0 | 凭证与回调前置检查 | 确认 app_id/app_key 已获批；在知乎开放平台登记 `https://api.anota.best/auth/zhihu/callback`；创建 KV/DO | 回调地址完全一致；Secrets 不进入源码/git/日志 |
+| A0 | 凭证与回调前置检查 | 用户确认回调已登记；复用现有 Cloudflare KV 绑定为 `OAUTH_KV`；确认 app_id/app_key 由后续安全配置提供 | 回调地址完全一致；KV 绑定存在；Secrets 不进入源码/git/日志 |
 | A1 | Worker OAuth 起点 | `/auth/zhihu/start` 创建 flow_id/state，返回 authorize_url；KV/DO TTL | state 随机、单次 flow、过期 flow 拒绝、无 app_key 明文响应 |
 | A2 | Worker callback + 换 Token | callback 兼容 `authorization_code`/`code`；后端请求 `/access_token`；OAuth Token 服务端保存 | 错 state 拒绝；无 state 明示临时联调；code/token 不进日志 |
 | A3 | 应用会话签发 | `/auth/zhihu/status` 一次性领取应用 JWT；业务路由继续校验 JWT | flow 不可重复领取；JWT 带 exp/iss/aud/sub；OAuth Token 从不下发 |
@@ -720,16 +720,25 @@ Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
 **审批门槛（全部满足后才开始 A0）：**
 
 - [x] AQ1～AQ7 已确认（AQ1～AQ3、AQ5～AQ7 按建议；AQ4 已明确改为 OAuth-only）
-- [ ] 已确认知乎开放平台应用凭证确实可用于当前应用，且允许登记公网 HTTPS callback
-- [ ] 接受当前 OAuth 缺少 state（可能）、PKCE、refresh token、撤销/解绑协议，只作为黑客松联调基线
-- [ ] 接受新增 Cloudflare KV/DO 作为短期状态与 OAuth 会话存储
-- [ ] 确认 V3.1 不读取创作/关注/收藏等用户数据，只做登录门禁（除非另行审批）
+- [x] 已确认知乎开发平台回调地址已登记：`https://api.anota.best/auth/zhihu/callback`
+- [x] 接受当前 OAuth 缺少 state（可能）、PKCE、refresh token、撤销/解绑协议，只作为黑客松联调基线
+- [x] 接受新增 Cloudflare KV/DO 作为短期状态与 OAuth 会话存储（A0 复用现有 KV，绑定名 `OAUTH_KV`）
+- [x] 确认 V3.1 不读取创作/关注/收藏等用户数据，只做登录门禁（除非另行审批）
 
-### 当前实施阻塞项
+### A0 执行记录（2026-09-13）
 
-- **等待回调登记**：请在知乎开发平台填写 `https://api.anota.best/auth/zhihu/callback`。
-- 这是计划中的固定公网 HTTPS 回调地址；在 A1/A2 实现并部署之前，不能声称 OAuth 已打通。
-- 回调地址必须与知乎平台登记值完全一致（协议、域名、路径均一致，不加尾部 `/`）。
+- 用户已确认知乎开发平台完成回调登记：`https://api.anota.best/auth/zhihu/callback`。
+- `api.anota.best/health` 线上返回 200，确认当前 Worker 与域名正常；OAuth callback 尚未实现，不能据此声称 OAuth 已打通。
+- Cloudflare 账号已有 KV namespace；`qiuzhen-proxy/wrangler.toml` 已绑定为 `OAUTH_KV`，供 flow/state 与服务端会话使用。
+- 当前 Worker Secret 名称基线已核对（仅名称，不读取值）；仍为 V2.8 旧认证集合，OAuth Secret 尚未写入。
+- A0 已完成：回调已登记；进入 A1。
+- OAuth 应用配置文件已确认存在（仅确认存在性，不读取/输出值）；后续按安全方式将 `app_id` 配置为 Worker 普通变量，`app_key` 配置为 Worker Secret。
+- 现有 Worker Secret 名称基线仍为 V2.8 集合；A1 只需要 `OAUTH_KV` 与公开 `app_id`，不读取 OAuth Secret 值。
+
+### A1 执行记录（进行中）
+
+- 目标：实现 `/auth/zhihu/start`，生成一次性 `flow_id`/`state`，写入 `OAUTH_KV`（TTL 10 分钟），返回知乎授权地址。
+- 暂不部署，先完成本地结构验证与 dry-run；A1 部署前必须确认 `ZHIHU_OAUTH_APP_ID` 已配置且不包含任何 Secret。
 
 ---
 
