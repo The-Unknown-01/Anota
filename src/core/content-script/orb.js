@@ -16,6 +16,7 @@
   var badge = null;
   var arc = null;    // 雷达探针外圈（A 透镜 + B 探针）
   var label = null;
+  var iconSvg = null;
 
   // ---------- DOM ----------
 
@@ -31,7 +32,7 @@
       'width: 84px', 'height: 84px', 'border-radius: 50%', 'box-sizing: border-box', // O2：42px → 84px
       'display: flex', 'align-items: center', 'justify-content: center',
       'cursor: pointer', 'user-select: none',
-      // A·透镜：衬线"求"字 + 品牌渐变墨色（由 label 应用），字体走系统衬线栈
+      // A·透镜：SVG 放大镜图标；颜色由 iconSvg.currentColor 继承状态色
       'font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", serif',
       'font-size: 27px', 'font-weight: 700',
       // A·玻璃透镜：左上径向高光 + 靛蓝→紫的浅玻璃渐变（状态色由 setState 覆盖同构渐变）
@@ -43,13 +44,26 @@
       'opacity: .5'
     ].join(';');
 
-    // 标签（"求"）：品牌渐变墨色（background-clip: text；错误态在 setState 覆盖为纯色 !）
+    // 标签图标：内联 SVG 放大镜（替代文字“求”）；aria-hidden 避免重复朗读
     label = document.createElement('span');
-    label.textContent = '求';
-    label.style.cssText = 'position: relative; z-index: 1; line-height: 1;' +
-      'background: linear-gradient(180deg, #5b6cf0 0%, #8b5cf6 100%);' +
-      '-webkit-background-clip: text; background-clip: text; color: transparent;';
-    orb.appendChild(label);
+    label.setAttribute('aria-hidden', 'true');
+    label.style.cssText = 'position: relative; z-index: 1; width: 42px; height: 42px; line-height: 0; display: block; color: #6675ef; transition: color .25s ease, transform .25s ease;';
+    var NS_ICON = 'http://www.w3.org/2000/svg';
+    iconSvg = document.createElementNS(NS_ICON, 'svg');
+    iconSvg.setAttribute('viewBox', '0 0 48 48');
+    iconSvg.setAttribute('width', '42');
+    iconSvg.setAttribute('height', '42');
+    iconSvg.setAttribute('role', 'img');
+    iconSvg.setAttribute('focusable', 'false');
+    iconSvg.setAttribute('aria-hidden', 'true');
+    iconSvg.style.cssText = 'display: block; width: 100%; height: 100%; overflow: visible;';
+    var lens = document.createElementNS(NS_ICON, 'circle');
+    lens.setAttribute('cx', '20.5'); lens.setAttribute('cy', '20.5'); lens.setAttribute('r', '11.5');
+    lens.setAttribute('fill', 'rgba(255,255,255,.24)'); lens.setAttribute('stroke', 'currentColor'); lens.setAttribute('stroke-width', '3.2');
+    var handle = document.createElementNS(NS_ICON, 'path');
+    handle.setAttribute('d', 'M29 29 L40 40'); handle.setAttribute('fill', 'none'); handle.setAttribute('stroke', 'currentColor');
+    handle.setAttribute('stroke-width', '4.2'); handle.setAttribute('stroke-linecap', 'round');
+    iconSvg.appendChild(lens); iconSvg.appendChild(handle); label.appendChild(iconSvg); orb.appendChild(label);
 
     badge = document.createElement('div');
     badge.style.cssText = [
@@ -192,7 +206,8 @@
       orb.style.borderColor = 'rgba(47,158,99,.55)';
       orb.style.boxShadow = '0 8px 22px rgba(47,158,99,.22), inset 0 1px 6px rgba(255,255,255,.85)';
       orb.style.animation = 'qiuzhen-pulse .55s ease-out 1';
-      label.textContent = '求';
+      label.style.color = '#6675ef';
+      label.style.transform = 'scale(1)';
       badge.textContent = String(detail || 0);
       badge.style.display = 'block';
       // 激活 Hover 声明交互层（U3）
@@ -203,18 +218,16 @@
       orb.style.background = 'radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(255,236,232,.6) 60%, rgba(255,206,198,.42))';
       orb.style.borderColor = 'rgba(207,75,60,.5)';
       orb.style.boxShadow = '0 8px 22px rgba(207,75,60,.18), inset 0 1px 6px rgba(255,255,255,.85)';
-      label.textContent = '!';
-      label.style.cssText = 'position: relative; z-index: 1; line-height: 1; color: #cf4b3c;';
+      label.style.color = '#cf4b3c';
+      label.style.transform = 'scale(1)';
       badge.style.display = 'none';
     } else {
       // idle / analyzing：玻璃透镜常态 + 渐变墨色"求"
       orb.style.background = 'radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), rgba(255,255,255,0) 55%), linear-gradient(145deg, rgba(255,255,255,.86), rgba(224,230,255,.55) 60%, rgba(197,206,255,.42))';
       orb.style.borderColor = 'rgba(255,255,255,.9)';
       orb.style.boxShadow = '0 8px 22px rgba(40,50,120,.18), inset 0 1px 6px rgba(255,255,255,.85)';
-      label.textContent = '求';
-      label.style.cssText = 'position: relative; z-index: 1; line-height: 1;' +
-        'background: linear-gradient(180deg, #5b6cf0 0%, #8b5cf6 100%);' +
-        '-webkit-background-clip: text; background-clip: text; color: transparent;';
+      label.style.color = '#6675ef';
+      label.style.transform = 'scale(1)';
       badge.style.display = 'none';
     }
     if (s === STATE.IDLE) orb.style.opacity = '0.5'; else orb.style.opacity = '1';

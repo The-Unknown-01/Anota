@@ -1149,6 +1149,13 @@ MVP 优先采用**结构化阶段事件 + 增量候选卡片**，而不是直接
 - `index.html` 引入 `workflow-events.js`。
 - 验证：`V33-V2V3 VERIFY 21/21`（jsdom 加载真实 index.html+panel.js：点击求异 Tab → 真实 emitter 事件驱动 → 卡片增量/去重/点亮、timeout 态、stale seq/异 requestId 拒绝、5s 静默提示、最终响应停 ticker）；V0 14/14、V1 15/15、Z1 11/11、OAuth UI 14/14、smoke 45/45 回归通过。
 
+### 悬浮球 SVG 图标执行记录 ✅（2026-09-14）
+
+- `src/core/content-script/orb.js`：将悬浮球中的文字「求」替换为内联 SVG 放大镜（圆形镜片 + 斜向手柄），`viewBox=0 0 48 48`，描边使用 `currentColor`。
+- 保持原有 `aria-label`、title、点击/拖动/位置记忆、READY 徽标、扫描弧、错误态和波浪装饰；错误态不再把图标改写为「!」，只切换 SVG 颜色。
+- SVG 设为 `aria-hidden`，避免与外层「求真：分析本文可验证声明」语义重复朗读；未改变悬浮球点击行为。
+- 验证：`ORB-SVG-FRESH VERIFY 14/14`；V33-V0 14/14、V1 15/15、V2/V3 21/21、smoke 45/45；`node --check` 通过。
+
 
 # 已知环境问题
 - 知乎平台 30001 频率限制窗口（无 Retry-After）：串行+缓存已缓解。
