@@ -1129,7 +1129,7 @@
     authLoginBtn.hidden = !!state.loggedIn;
     authUser.hidden = !state.loggedIn;
     authLogoutBtn.hidden = !state.loggedIn;
-    if (state.loggedIn) authUser.textContent = state.alias || '已登录';
+    if (state.loggedIn) authUser.textContent = state.displayName || state.alias || '已授权知乎账号';
   }
 
   function stopOAuthWaiting() {

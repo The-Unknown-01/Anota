@@ -81,15 +81,19 @@
       var invalid = new Error('oauth_session_invalid'); invalid.code = 'oauth_session_invalid';
       return Promise.reject(invalid);
     }
+    var displayName = String(body.display_name || payload.display_name || payload.sub || '').trim();
+    var alias = displayName || '已授权知乎账号';
     var auth = {
       accessToken: body.access_token,
       expiresAt: Date.now() + (body.expires_in || 86400) * 1000,
-      alias: String(payload.sub || 'zhihu-user'),
+      alias: alias,
+      displayName: displayName || null,
+      zhihuUserId: body.zhihu_user_id || payload.zhihu_user_id || null,
       authMethod: 'zhihu_oauth'
     };
     _cachedToken = auth.accessToken;
     return save(auth).then(clearLegacy).then(function () {
-      return { ok: true, alias: auth.alias, authMethod: auth.authMethod };
+      return { ok: true, alias: auth.alias, displayName: auth.displayName, zhihuUserId: auth.zhihuUserId, authMethod: auth.authMethod };
     });
   }
 
@@ -139,10 +143,10 @@
     }
     return load().then(function (a) {
       if (!a || !a.accessToken || a.authMethod !== 'zhihu_oauth' || (a.expiresAt && a.expiresAt <= Date.now())) {
-        return { mode: 'proxy', loggedIn: false, needsLogin: true, alias: null, authMethod: null };
+        return { mode: 'proxy', loggedIn: false, needsLogin: true, alias: null, displayName: null, authMethod: null };
       }
       _cachedToken = a.accessToken;
-      return { mode: 'proxy', loggedIn: true, needsLogin: false, alias: a.alias, expiresAt: a.expiresAt, authMethod: a.authMethod };
+      return { mode: 'proxy', loggedIn: true, needsLogin: false, alias: a.alias, displayName: a.displayName || a.alias || null, zhihuUserId: a.zhihuUserId || null, expiresAt: a.expiresAt, authMethod: a.authMethod };
     });
   }
 

@@ -382,7 +382,9 @@ li.cand.lit .cand-type { background: rgba(46,158,91,.16); color: var(--ok, #2e9e
   border-radius: var(--radius-lg);
 }
 .auth-panel-title { font-size: 12px; font-weight: 600; color: var(--ink-1); }
-.oauth-verifying[hidden] { display: none !important; }
+.auth-panel[hidden], .auth-area[hidden], .oauth-verifying[hidden],
+#auth-login-btn[hidden], #auth-user[hidden], #auth-logout-btn[hidden],
+#auth-error[hidden], #auth-hint[hidden], #oauth-copy[hidden] { display: none !important; }
 .oauth-copy { font-size: 11px; color: var(--ink-3); line-height: 1.5; }
 .oauth-verifying {
   display: grid; grid-template-columns: 22px 1fr; align-items: center; gap: 2px 8px;

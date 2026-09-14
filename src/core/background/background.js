@@ -187,7 +187,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
           if (r.status === 'authorized') {
             // 领取动作必须在短消息内完成；不持有长连接。
             return WCC_AUTH.acceptOAuth(r).then(function (accepted) {
-              sendResponse({ ok: true, status: 'authorized', alias: accepted.alias, authMethod: accepted.authMethod });
+              sendResponse({ ok: true, status: 'authorized', alias: accepted.alias, displayName: accepted.displayName, zhihuUserId: accepted.zhihuUserId, authMethod: accepted.authMethod });
             });
           }
           sendResponse({ ok: true, status: 'pending' });
