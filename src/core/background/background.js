@@ -1,6 +1,6 @@
 // Background Service Worker：Active Selection 的唯一中转与持久点（MV3，无独立后端——D2=B）。
 // 职责（PRD 06-技术架构 §4）：接收 CAPTURE_SELECTION → 存 storage.session → 广播/打开 Side Panel。
-importScripts('../generated-config.js', '../utils/message-types.js', '../utils/evidence-network.js', '../auth/invite-jwt.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/evidence-extractor.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/v25-pipeline.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js');
+importScripts('../generated-config.js', '../utils/message-types.js', '../utils/evidence-network.js', '../auth/oauth-auth.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/evidence-extractor.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/v25-pipeline.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js');
 
 // ---------- Active Selection 状态 ----------
 
@@ -173,17 +173,28 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse({ ok: true, pong: true, at: Date.now() });
       return false;
 
-    // ---------- V2.8 登录门禁（邀请码 + JWT） ----------
+    // ---------- V3.1 OAuth 登录 ----------
     case WCC_MSG.AUTH_LOGIN:
-      (function () {
-        var code = String((message && message.inviteCode) || '').trim();
-        if (!code) { sendResponse({ ok: false, reason: 'invite_code_required' }); return; }
-        WCC_AUTH.redeem(code).then(
-          function (r) { sendResponse({ ok: true, alias: r.alias }); },
-          function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'login_failed') }); }
-        );
-      })();
-      return true; // 异步响应
+      WCC_AUTH.startOAuth().then(
+        function (r) { sendResponse({ ok: true, flowId: r.flowId, authorizeUrl: r.authorizeUrl, expiresIn: r.expiresIn }); },
+        function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'oauth_start_failed') }); }
+      );
+      return true;
+
+    case WCC_MSG.AUTH_OAUTH_POLL:
+      WCC_AUTH.checkOAuth(String(message.flowId || '')).then(
+        function (r) {
+          if (r.status === 'authorized') {
+            // 领取动作必须在短消息内完成；不持有长连接。
+            return WCC_AUTH.acceptOAuth(r).then(function (accepted) {
+              sendResponse({ ok: true, status: 'authorized', alias: accepted.alias, authMethod: accepted.authMethod });
+            });
+          }
+          sendResponse({ ok: true, status: 'pending' });
+        },
+        function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'oauth_status_failed') }); }
+      );
+      return true;
 
     case WCC_MSG.AUTH_STATE:
       WCC_AUTH.getAuthState().then(

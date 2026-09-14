@@ -735,12 +735,55 @@ Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
 - OAuth 应用配置文件已确认存在（仅确认存在性，不读取/输出值）；后续按安全方式将 `app_id` 配置为 Worker 普通变量，`app_key` 配置为 Worker Secret。
 - 现有 Worker Secret 名称基线仍为 V2.8 集合；A1 只需要 `OAUTH_KV` 与公开 `app_id`，不读取 OAuth Secret 值。
 
-### A1 执行记录（进行中）
+### A1 执行记录 ✅（2026-09-13）
 
 - 目标：实现 `/auth/zhihu/start`，生成一次性 `flow_id`/`state`，写入 `OAUTH_KV`（TTL 10 分钟），返回知乎授权地址。
-- 暂不部署，先完成本地结构验证与 dry-run；A1 部署前必须确认 `ZHIHU_OAUTH_APP_ID` 已配置且不包含任何 Secret。
+- 实现：Worker 新增 OAuth 起点；flow 主记录与 state 反查索引双写 KV；授权 URL 固定为 `https://openapi.zhihu.com/authorize`，回调固定为 `https://api.anota.best/auth/zhihu/callback`。
+- 配置：公开 `ZHIHU_OAUTH_APP_ID` 写入 Worker vars；未读取或写入 app_key、Access Secret、OAuth Token。
+- 验证：本地 `V31-A1 VERIFY 8/8`；线上 `V31-A1-ONLINE VERIFY 9/9`；dry-run 识别 `OAUTH_KV` 与 App ID；Worker 版本 `ac10fd6e-f210-4aad-a0ef-6180347bb399`。
+- A1 完成，进入 A2：实现 callback、state 校验与后端 code 换 Token。
 
----
+### A2 执行记录 ✅（2026-09-13）
+
+- 实现：`GET /auth/zhihu/callback`；兼容 `authorization_code`/`code`；state 反查 flow、常量时间比较、一次性删除 state 索引。
+- 换 Token：Worker 后端 POST `https://openapi.zhihu.com/access_token`，OAuth Token 只写入 `OAUTH_KV` session，不进入 HTML/URL/扩展响应。
+- 安全降级：缺 state 明确提示仅适合临时联调并拒绝建立会话；缺 app_key 时不调用上游，不伪造成功。
+- 验证：本地 `V31-A2 VERIFY 10/10`；dry-run 通过；线上缺 code/缺 state/未知 state 均 400 且无敏感字段泄露；Worker 版本 `d726b747-963d-45be-9ed8-658d18f6b49a`。
+- 真实 code 换 Token 待配置 `ZHIHU_OAUTH_APP_KEY` 后人工授权联调，当前不声称 OAuth 全链路已打通。
+
+### A4 执行记录（进行中）
+
+- 实现：扩展登录 UI 从邀请码输入改为「知乎登录」；点击后请求 Worker `/auth/zhihu/start`，新标签打开知乎官方授权页；用户本人确认后，扩展通过 `/auth/zhihu/status?flow_id=...` 轮询并领取应用 JWT。
+- OAuth Token 不进入扩展；扩展仅保存 `authMethod=zhihu_oauth` 的应用 JWT。过期后重新授权，不调用旧 refresh。
+- Worker 门禁同步收紧：JWT 必须带 `auth=zhihu_oauth`；静态 `ACCESS_TOKENS` 与旧邀请码 JWT 均不得访问业务 API。
+- 验证：本地 `V31-A4 VERIFY 14/14` + `V31-OAUTH-ONLY VERIFY 11/11`；Worker 最新部署版本 `b958aba3-a61f-481d-b1b4-6b1f5d250975`；线上起点/边界验证通过。
+- **待人工完成**：用户在知乎官方授权页点击最终确认；随后人工确认扩展登录态、重新触发求真以及未授权/退出/过期反馈。
+
+#### A4-UI · OAuth 验证反馈（2026-09-13，用户提出）
+
+目标：授权页打开后，Side Panel 不再保持静态提示，而是明确进入可感知的验证状态。
+
+| 状态 | UI 行为 | 结束条件 |
+|---|---|---|
+| 未开始 | 显示 OAuth 说明与「打开知乎授权」按钮 | 用户点击按钮 |
+| 正在验证 | 原按钮区切换为 Liquid Glass 验证模块：环形 spinner +「正在验证知乎授权」+ `已等待 Ns` 读秒；每秒更新计时 | status=authorized / error / 10 分钟超时 |
+| 验证成功 | 立即停止 spinner/计时器，刷新登录态，自动隐藏整个 `auth-panel`；若有被拦截的 Claim，继续原分析 | 应用 JWT 已成功写入 storage.local |
+| 验证失败/过期 | 停止 spinner/计时器，恢复授权按钮，显示可重试错误，不把失败当成功 | flow error/404/401/网络错误/超时 |
+
+实现原则：
+
+- 读秒只反映本地等待时间，不伪造 OAuth 进度百分比。
+- `pending` 只更新等待状态，不关闭弹窗；只有 `authorized` 且 JWT 保存成功才能自动隐藏。
+- 同时清理重复 timer，避免连续点击后多个轮询/读秒并发。
+- 动画仅使用 `transform`/`opacity`，支持 `prefers-reduced-motion` 降级。
+
+### A4-UI 执行记录 ✅（2026-09-13）
+
+- 新增 `oauth-verifying` 状态模块：spinner +「正在验证知乎授权」+ `已等待 Ns`；点击打开授权后立即进入验证动画。
+- 新增每秒读秒计时器；pending 期间保持窗口与验证状态，不会把 pending 误判为成功。
+- authorized 分支先停止轮询/读秒 timer，再自动隐藏整个 `auth-panel`，刷新登录态并重试被拦截的求真。
+- 失败、过期、取消、退出均清理 timer 并恢复授权按钮/说明；增加 `prefers-reduced-motion` 降级。
+- 验证：`V31-OAUTH-UI VERIFY 14/14`；语法全过；`smoke-search-advise.js` 45/45。
 
 # 已知环境问题
 

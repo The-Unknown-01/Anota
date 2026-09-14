@@ -356,7 +356,7 @@
   function showError(reason) {
     var map = {
       config_missing: ['未配置 API Key', '请在项目根放置 deepseek_api.key 并运行 node scripts/gen-config.js，然后重新加载扩展'],
-      needs_login: ['需要登录', '请点击右上角「登录」输入邀请码后使用'],
+      needs_login: ['需要知乎登录', '请点击右上角「知乎登录」，完成知乎官方授权后使用'],
       http_401: ['鉴权失败', 'API Key 无效或已过期'],
       http_402: ['额度不足', 'DeepSeek 账户余额不足'],
       http_429: ['请求过于频繁', '请稍后再试'],
@@ -367,7 +367,7 @@
     els.errorDetail.textContent = m[1];
     hide(els.result); hide(els.loading);
     show(els.error);
-    // V2.8：未登录时自动展开登录弹层，引导输入邀请码
+    // V3.1 OAuth-only：未登录时自动展开 OAuth 引导弹层
     if (reason === 'needs_login') openAuthPanel();
   }
 
@@ -1102,19 +1102,24 @@
     document.body.prepend(wrap);
   })();
 
-  // ---------- V2.8 登录门禁（邀请码 + JWT；仅代理模式显示入口） ----------
+  // ---------- V3.1 OAuth-only 登录门禁（仅代理模式显示入口） ----------
 
   var authArea = document.getElementById('auth-area');
   var authLoginBtn = document.getElementById('auth-login-btn');
   var authUser = document.getElementById('auth-user');
   var authLogoutBtn = document.getElementById('auth-logout-btn');
   var authPanel = document.getElementById('auth-panel');
-  var authInput = document.getElementById('auth-code-input');
   var authSubmit = document.getElementById('auth-submit');
   var authCancel = document.getElementById('auth-cancel');
   var authError = document.getElementById('auth-error');
   var authHint = document.getElementById('auth-hint');
-  var suppressAuthAutoOpen = false; // 手动提交/登出后抑制 refreshAuthState 的自动弹层（修复：登录成功窗口不自动关）
+  var oauthCopy = document.getElementById('oauth-copy');
+  var oauthVerifying = document.getElementById('oauth-verifying');
+  var oauthElapsed = document.getElementById('oauth-elapsed');
+  var authPollTimer = null;
+  var authElapsedTimer = null;
+  var authPollStartedAt = 0;
+  var suppressAuthAutoOpen = false; // 手动登录后抑制 refreshAuthState 的自动弹层
 
   function renderAuth(state) {
     if (!authArea) return;
@@ -1127,12 +1132,43 @@
     if (state.loggedIn) authUser.textContent = state.alias || '已登录';
   }
 
+  function stopOAuthWaiting() {
+    if (authPollTimer) { clearTimeout(authPollTimer); authPollTimer = null; }
+    if (authElapsedTimer) { clearInterval(authElapsedTimer); authElapsedTimer = null; }
+    if (oauthVerifying) oauthVerifying.hidden = true;
+    if (oauthCopy) oauthCopy.hidden = false;
+    if (oauthElapsed) oauthElapsed.textContent = '已等待 0 秒';
+  }
+
+  function startOAuthWaiting() {
+    stopOAuthWaiting();
+    authPollStartedAt = Date.now();
+    if (oauthVerifying) oauthVerifying.hidden = false;
+    if (oauthCopy) oauthCopy.hidden = true;
+    if (authSubmit) authSubmit.hidden = true;
+    if (authCancel) authCancel.hidden = true;
+    if (authHint) authHint.hidden = true;
+    function updateElapsed() {
+      if (!oauthElapsed) return;
+      var seconds = Math.max(0, Math.floor((Date.now() - authPollStartedAt) / 1000));
+      oauthElapsed.textContent = '已等待 ' + seconds + ' 秒';
+    }
+    updateElapsed();
+    authElapsedTimer = setInterval(updateElapsed, 1000);
+  }
+
+  function restoreOAuthActions() {
+    stopOAuthWaiting();
+    if (authSubmit) { authSubmit.hidden = false; authSubmit.disabled = false; }
+    if (authCancel) authCancel.hidden = false;
+  }
+
   function refreshAuthState() {
     chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_STATE }, function (resp) {
       void chrome.runtime.lastError;
       if (resp && resp.ok) {
         renderAuth(resp.state);
-        // V2.8：PROXY 未登录且无 Claim 工作台（悬浮球引导路径）→ 自动展开登录弹层
+        // V3.1 OAuth-only：未登录且无 Claim 时自动展开 OAuth 引导
         // 修复：手动登录成功后的一段时间内不再自动弹回（等真实登录态生效）
         if (suppressAuthAutoOpen) {
           suppressAuthAutoOpen = false;
@@ -1143,52 +1179,49 @@
     });
   }
 
-  // V2.8：展开登录弹层（悬浮球/API 被门禁拦截时引导登录）
+  // V3.1 OAuth-only：展开 OAuth 登录引导（悬浮球/API 被门禁拦截时）
   function openAuthPanel() {
     if (!authPanel) return;
     suppressAuthAutoOpen = false; // 手动展开视为用户主动，后续允许自动展开
     if (authHint) authHint.hidden = true;
     authPanel.hidden = false;
     authError.hidden = true;
-    authInput.value = '';
-    authInput.focus();
+    restoreOAuthActions();
   }
 
   if (authArea) {
     authLoginBtn.addEventListener('click', openAuthPanel);
-    authCancel.addEventListener('click', function () { authPanel.hidden = true; });
+    authCancel.addEventListener('click', function () {
+      stopOAuthWaiting();
+      authPanel.hidden = true;
+    });
     authLogoutBtn.addEventListener('click', function () {
+      stopOAuthWaiting();
       chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGOUT }, function () {
         void chrome.runtime.lastError;
         refreshAuthState();
       });
     });
-    function submitCode() {
-      var code = authInput.value.trim();
-      if (!code) return;
+    function startOAuthLogin() {
       authSubmit.disabled = true;
       authError.hidden = true;
-      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGIN, inviteCode: code }, function (resp) {
+      startOAuthWaiting();
+      authHint.textContent = '正在打开知乎授权页面……';
+      authHint.hidden = false;
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGIN }, function (resp) {
         void chrome.runtime.lastError;
-        authSubmit.disabled = false;
         if (resp && resp.ok) {
-          suppressAuthAutoOpen = true; // 登录成功：先隐藏并抑制刷新回包再弹回
-          authPanel.hidden = true;
-          authInput.blur();
-          refreshAuthState();
-          // V2.8：登录成功后自动重触发当前分析（面板刚被拦截的路径）
-          if (state.claimPayload && !state.analyzing) {
-            renderView(); // 无缓存 → startAnalysis 自动触发
-          } else if (authHint) {
-            // 悬浮球路径（无 Claim）：提示用户再点悬浮球即可开始扫描
-            authHint.textContent = '已开通 ✓ 现在回到网页点击右上角「求」悬浮球即可开始全文扫描';
-            authHint.hidden = false;
-          }
+          chrome.tabs.create({ url: resp.authorizeUrl }, function () {
+            authHint.textContent = '请在知乎页面完成授权，完成后返回此面板。';
+            authSubmit.disabled = false;
+            pollOAuthLogin(resp.flowId, true);
+          });
         } else {
+          restoreOAuthActions();
           var reason = (resp && resp.reason) || 'login_failed';
           var msgMap = {
-            invalid_invite_code: '邀请码无效，请检查后重试',
-            auth_not_configured: '登录服务未配置',
+            oauth_not_configured: 'OAuth 登录服务尚未配置',
+            oauth_start_failed: '无法启动知乎登录',
             auth_timeout: '网络超时，请重试',
             auth_network_error: '网络错误，请重试'
           };
@@ -1197,8 +1230,44 @@
         }
       });
     }
-    authSubmit.addEventListener('click', submitCode);
-    authInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitCode(); });
+    function pollOAuthLogin(flowId, first) {
+      if (authPollTimer) { clearTimeout(authPollTimer); authPollTimer = null; }
+      if (first) authPollStartedAt = Date.now();
+      if (Date.now() - authPollStartedAt >= 10 * 60 * 1000) {
+        restoreOAuthActions();
+        authError.textContent = '授权等待超时，请重新打开知乎登录。';
+        authError.hidden = false;
+        return;
+      }
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_OAUTH_POLL, flowId: flowId }, function (resp) {
+        void chrome.runtime.lastError;
+        if (resp && resp.ok && resp.status === 'authorized') {
+          stopOAuthWaiting();
+          suppressAuthAutoOpen = true;
+          authPanel.hidden = true;
+          authHint.hidden = true;
+          refreshAuthState();
+          if (state.claimPayload && !state.analyzing) renderView();
+          return;
+        }
+        if (resp && resp.ok && resp.status === 'pending') {
+          authHint.textContent = '请在知乎页面完成授权，完成后返回此面板。正在等待授权结果……';
+          authPollTimer = setTimeout(function () { pollOAuthLogin(flowId, false); }, 1500);
+          return;
+        }
+        restoreOAuthActions();
+        var reason = (resp && resp.reason) || 'oauth_status_failed';
+        var msgMap = {
+          flow_not_found_or_expired: '授权流程已过期，请重新打开知乎登录。',
+          oauth_session_expired: '授权会话已过期，请重新打开知乎登录。',
+          oauth_failed: '知乎授权失败，请重新打开知乎登录。',
+          oauth_status_failed: '无法获取授权状态，请重试。'
+        };
+        authError.textContent = msgMap[reason] || '知乎授权未完成，请重试。';
+        authError.hidden = false;
+      });
+    }
+    authSubmit.addEventListener('click', startOAuthLogin);
 
     refreshAuthState();
   }
