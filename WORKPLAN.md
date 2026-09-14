@@ -22,6 +22,9 @@
 - [V2.8 · 登录门禁（升级计划 + 执行记录）](#v28--登录门禁邀请码--jwt)
 - [V2.9 · 检索算法闭环（algorizm_fix 分支）](#v29--检索算法闭环algorizm_fix-分支)
 - [V3.0 · 可视化动态交互（规划 + 执行记录）](#v30--可视化动态交互规划--执行记录)
+- [V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 执行中）](#v31--知乎官方-oauth-登录迁移升级计划--执行中)
+- [V3.2 · 求深/求异知乎回答辅助材料（升级计划 · 待审批）](#v32--求深求异知乎回答辅助材料升级计划--待审批)
+- [V3.3 · 求深/求异可观测工作流与实时动态可视化（升级计划 · 待审批）](#v33--求深求异可观测工作流与实时动态可视化升级计划--待审批)
 - [已知环境问题](#已知环境问题)
 - [遗留事项](#遗留事项)
 
@@ -259,7 +262,7 @@
 > 依据 `docs/v2.7_UPGRADE.md`（人工改造，2026-08-29~30 两天，提交 `55613f0` + `b49a72b`）。
 > 核心目标：**密钥仅存于云端、扩展零密钥**的安全可移植形态——引入 Cloudflare Workers 透明代理，
 > 分发包不含任何第三方 API 密钥，扩展仅持一个可随时撤销/轮换的访问令牌。
-> 代理源码独立于扩展仓库：`D:\code\2026zhihu_hackathon\qiuzhen-proxy\`（worker.js + wrangler.toml，非 git 仓库）。
+> 代理源码独立于扩展仓库，非 git 仓库。
 
 ## 计划要点（架构变化）
 
@@ -312,7 +315,7 @@
 
 - 回归冒烟：`node scripts/smoke-search-advise.js` → **45/45 PASS**
 - 语法校验：7 个改动文件 node --check 全过
-- 零密钥确认：`grep -cE "sk-ca0c|mk-6DCB|e673c367|64e12d23" src/core/generated-config.js` → **0**
+- 零密钥确认：敏感凭证前缀扫描 → **0 命中**（具体值不记录于 WORKPLAN）
 - 当前环境：generated-config.js 为 PROXY 模式（https://api.anota.best，零密钥）
 - 浏览器端到端与 Worker 联调：待人工实测（见遗留）
 
@@ -327,6 +330,10 @@
 > 知乎 OAuth 面向「三方登录 + 获取授权用户个人信息」，与"仅作为登录门槛"的需求不匹配（申请需人工邮件审批、
 > 授权范围是邮箱/手机/公开内容、access_token 仅 1h 有效且无 refresh_token），故改用邀请码 + JWT。
 > **（本计划待审批）**
+>
+> **后续演进说明（2026-09-06）**：本节保留为 V2.8 已交付历史，不回写或抹除。根据更新后的
+> `zhihu-skill` OAuth 联调基线，邀请码入口拟由 V3.1 的「知乎官方 OAuth → 应用会话 JWT」替代。
+> V3.1 已获批准并在 `v3.1-oauth-only` 分支执行；在 OAuth-only 收口完成前，线上邀请码能力仍暂时保留。
 
 ## O-0 · 架构解读
 
@@ -570,9 +577,587 @@ V2.8 批准记录：已批准（2026-08-31，按建议），开始执行 O0。
 
 ---
 
-# 已知环境问题
+# V3.1 · 知乎官方 OAuth 登录迁移（升级计划 · 执行中）
 
-- **Chrome 151 + --load-extension 的 content script 注入失效**（自动化测试环境）：开发者模式扩展的 content script 不再注入（含最小 hello-world 复现；site access"所有网站"后仅首次导航偶发注入）。注入链模拟证明 5 个 content script 无运行时错误。**影响**：E2E 自动化暂不可用。**缓解**：人工加载扩展正常使用，或降级 Chrome for Testing 跑 E2E。
+> 依据：仓库内更新后的 `zhihu-skill/SKILL.md`、`zhihu-skill/references/oauth-introduction.md`、
+> `zhihu-skill/references/oauth-boundary.md` 及 OAuth Hello World 参考实现。
+> 目标：将 V2.8 的「输入邀请码 → Worker 自签 JWT」改为「用户亲自完成知乎官方授权 → Worker 建立应用会话」，
+> 同时保持 V2.7 已有的 API 密钥隔离与 V2.8 的强制门禁语义。
+> **本节已获批准；按 A0→A7 顺序执行。OAuth 配置密钥仍只在需要时安全读取，不打印、不入库。**
+
+## 3.1.1 · 方案结论与边界
+
+### 为什么现在可以重启 OAuth 方案
+
+2026-08-31 放弃 OAuth，是因为当时只掌握「OAuth 用于三方登录/用户数据」这一产品定位，且协议资料不完整。
+本次 `zhihu-skill` 更新给出了可执行的黑客松联调基线：授权地址、code 交换 Token、双凭证用户 API 调用方式、
+公网 HTTPS 回调要求与五项用户接口验收。因此，若产品目标从「匿名门槛」升级为「知乎账号登录」，OAuth 与需求重新匹配。
+
+### 必须保留的协议边界
+
+- OAuth 仅能在部署后的**公网 HTTPS 回调**完成；`localhost` / `127.0.0.1` 只能预览 UI。
+- 用户必须亲自点击知乎授权页的最终确认按钮；扩展或 Agent 不代点。
+- 回调参数优先读取 `authorization_code`，兼容 `code`；换 Token 表单字段仍为 `code`。
+- 实测回调可能不返回 `state`：有 state 时必须 timing-safe 校验；没有 state 时只能标记「黑客松临时联调」，不得宣称生产安全。
+- 当前协议没有 PKCE、scope、refresh token、撤销、解绑或拒绝授权流程；OAuth Token 过期后只能重新授权。
+- `/user` 没有正式响应 schema：昵称/头像获取失败不得伪造，也不得阻断登录门禁或正式用户接口。
+- 用户 API 需要同时发送：`Authorization: Bearer *** Access Secret>` 与
+  `X-OAuth-Token: <用户 OAuth access_token>`；`app_key` 不是 Access Secret，也不是 X-OAuth-Token。
+
+## 3.1.2 · 推荐架构
+
+```text
+扩展 Side Panel
+  │ ① 点击「使用知乎账号登录」
+  ▼
+Cloudflare Worker /auth/zhihu/start
+  │ ② 生成随机 state + 一次性 flow_id，写入短期服务端状态
+  │ ③ 302 → https://openapi.zhihu.com/authorize
+  ▼
+知乎官方授权页（用户本人确认）
+  │ ④ callback?authorization_code=...&state=...
+  ▼
+Worker /auth/zhihu/callback
+  │ ⑤ 用 app_id + app_key 在后端换 OAuth access_token
+  │ ⑥ OAuth Token 仅保存在服务端会话；可选尝试 /user 获取展示资料
+  │ ⑦ 向扩展签发「应用会话 JWT」（不把 OAuth Token 下发给扩展）
+  ▼
+扩展 chrome.storage.local：仅保存应用会话 JWT + 展示态
+  │ ⑧ 业务请求 Authorization: Bearer *** JWT>
+  ▼
+Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
+```
+
+关键决策：**知乎 OAuth Token 与应用会话 JWT 分层**。OAuth Token 代表知乎用户，只留服务端；扩展只持本项目的
+短期会话 JWT。这样现有 `guardApi()`、`isApiAllowed()`、`proxyAuthHeader()` 和业务代理路由可以最小改动复用，
+也避免把具有用户数据权限的 OAuth Token 暴露给前端。
+
+### OAuth 回调如何回到扩展
+
+推荐使用**短时一次性 flow_id 轮询**，而不是让知乎直接回调 `chrome-extension://`：
+
+1. 扩展调用 `/auth/zhihu/start` 获得 `authorize_url + flow_id`，新标签打开授权页；
+2. 知乎回调固定公网地址 `https://api.anota.best/auth/zhihu/callback`；
+3. Worker 完成换 Token 后，把 flow 标为 authorized；回调页只显示「授权成功，可返回扩展」；
+4. 扩展轮询 `/auth/zhihu/status?flow_id=...`，以一次性 code 领取应用会话 JWT；领取后 flow 立即失效。
+
+该方案不依赖 `chrome.identity.launchWebAuthFlow`，也不要求把扩展动态 ID 登记为回调地址；代价是 Worker 必须有
+短期状态存储。**不能继续使用内存 Map**：Cloudflare Worker 实例不稳定、会冷启动，应使用 KV 或 Durable Object，
+并为 state/flow 设置 5～10 分钟 TTL 与一次性领取语义。
+
+## 3.1.3 · 凭证、Token 与存储矩阵
+
+| 对象 | 作用 | 推荐存储 | 是否下发扩展 |
+|---|---|---|---|
+| `app_id` | 标识知乎第三方应用 | Worker 普通配置/vars | 可公开，但无需下发 |
+| `app_key` | 后端交换 OAuth Token | Worker Secret `ZHIHU_OAUTH_APP_KEY` | **否** |
+| 开放平台 Access Secret | 调知乎通用 API/用户 API 的调用方鉴权 | Worker Secret `ZHIHU_ACCESS_SECRET` | **否** |
+| OAuth 会话 Cookie | 绑定浏览器与服务端会话；HttpOnly/SameSite | 浏览器 Cookie（仅服务端读取） | **否（不转给扩展 JS）** |
+| `authorization_code` | 一次性换 Token | callback 请求内存，用后丢弃 | **否** |
+| 知乎 OAuth access_token | 代表已授权用户；无 refresh token | KV/DO 服务端会话，加密或最小暴露，按 expires_in 过期 | **否** |
+| 应用会话 JWT | 证明该扩展用户已完成知乎授权 | 扩展 `chrome.storage.local` + Worker 验签 | **是** |
+| flow_id/state | 绑定授权发起与回调、抵抗串号 | KV/DO，5～10 分钟 TTL，一次性 | flow_id 是，state 否 |
+
+安全红线：OAuth 配置文件 `zhihu-skill/OAuth配置.key` 与所有 key/token 一律不读入文档、不打印、不提交；
+正式部署只通过 `wrangler secret put` 或 Cloudflare 控制台注入。
+
+## 3.1.4 · 迁移策略（邀请码 → OAuth）
+
+采用**OAuth-only 一次性切换**，不保留邀请码兼容路径、管理员回退或双登录入口：
+
+1. 先新增 OAuth 后端路由、flow 状态存储与扩展 OAuth 登录 UI；
+2. 同一迁移分支内彻底删除 `/auth/redeem`、`/auth/refresh`、`INVITE_CODES`、邀请码输入 UI、批量邀请码文件与相关文档/验证脚本引用；
+3. 保留应用会话 JWT 鉴权层，但 JWT 的唯一签发依据改为「OAuth 会话授权成功」；
+4. 轮换 `JWT_SECRET`，清理 Worker 中静态令牌 fallback 与邀请码 Secrets，使旧邀请码签发的 JWT 立即失效；
+5. OAuth 未完成、取消、拒绝、过期或服务异常时，一律拒绝业务 API，不得回落到邀请码、静态令牌或匿名模式（DIRECT 开发模式除外）。
+
+不建议让业务 API 直接接受知乎 OAuth Token：这会把用户 Token 暴露到扩展，并把业务门禁与知乎用户接口鉴权耦合。
+
+## 3.1.5 · 里程碑与验收
+
+| # | 内容 | 交付效果 | 验收重点 |
+|---|---|---|---|
+| A0 | 凭证与回调前置检查 | 用户确认回调已登记；复用现有 Cloudflare KV 绑定为 `OAUTH_KV`；确认 app_id/app_key 由后续安全配置提供 | 回调地址完全一致；KV 绑定存在；Secrets 不进入源码/git/日志 |
+| A1 | Worker OAuth 起点 | `/auth/zhihu/start` 创建 flow_id/state，返回 authorize_url；KV/DO TTL | state 随机、单次 flow、过期 flow 拒绝、无 app_key 明文响应 |
+| A2 | Worker callback + 换 Token | callback 兼容 `authorization_code`/`code`；后端请求 `/access_token`；OAuth Token 服务端保存 | 错 state 拒绝；无 state 明示临时联调；code/token 不进日志 |
+| A3 | 应用会话签发 | `/auth/zhihu/status` 一次性领取应用 JWT；业务路由继续校验 JWT | flow 不可重复领取；JWT 带 exp/iss/aud/sub；OAuth Token 从不下发 |
+| A4 | 扩展登录体验 | 邀请码弹层彻底替换为知乎登录引导；打开授权页、轮询状态、成功后显示昵称或「已授权知乎账号」 | 只有 OAuth 成功后 API 放行；取消/拒绝/过期/网络错误均拒绝 API 并有明确反馈；`/user` 失败不阻断 |
+| A5 | 业务与用户接口联调 | 通用搜索仍使用应用级 Access Secret；按产品需要最小调用用户接口 | 双 Header 正确；用户接口默认不采集，只有明确产品用途才调用 |
+| A6 | OAuth-only 收口 | 删除邀请码全链路与 Worker fallback；轮换 JWT_SECRET；清理 INVITE_CODES | 旧邀请码 JWT 立即失效；不存在邀请码入口/路由/Secret；DIRECT 开发模式不受影响；文档同步 |
+| A7 | 回归与发布 | 登录门禁 + 搜索/深读 + V3.0 可视化完整回归，打版本 tag | 未登录零 API、授权后放行、退出/过期重新授权、smoke 45/45、浏览器无 runtime error |
+
+## 3.1.6 · 产品范围建议
+
+本次首要目的只是**用知乎账号完成身份门禁**。虽然 `zhihu-skill` 提供创作、关注、收藏夹、收藏夹内容、近期收藏
+五项用户接口的验收基线，但这些数据与「求真·深读」核心闭环并非必需。建议 V3.1：
+
+- 默认只建立登录身份；`/user` 仅用于昵称/头像展示，失败则显示「已授权知乎账号」。
+- 暂不读取创作/关注/收藏数据，避免为了技术展示扩大数据权限与隐私说明负担。
+- 若后续要做「基于收藏的个性化深读」，另写产品目标、最小数据范围、用户可见用途与删除机制后再审批。
+
+## 3.1.7 · 风险与降级
+
+| 风险 | 影响 | 计划应对 |
+|---|---|---|
+| 回调无 `state` | 无法宣称完整 OAuth CSRF 防护 | UI/日志标为临时联调；不作为生产安全完成项；等待平台补齐 |
+| 无 PKCE | authorization_code 被截获的风险更高 | HTTPS + 极短 flow TTL + code 后端立即交换 + 一次性领取应用 JWT |
+| 无 refresh token | OAuth Token 到期后无法静默续期 | 到期清会话并明确引导重新授权；不伪造刷新能力 |
+| Worker 无稳定内存会话 | 冷启动导致 flow/token 丢失 | KV/DO 持久化短期 flow 与 OAuth 会话；不使用 Map 作为正式实现 |
+| `/user` schema 不稳定 | 昵称/头像展示失败 | 个人资料作为 optional；失败不阻断登录与深读 |
+| 用户 API 权限扩大 | 隐私与信任成本增加 | V3.1 默认不调用五项用户数据接口；确有功能需求再单独审批 |
+| OAuth 平台能力仍属联调基线 | 不能声称生产完备 | 发布说明明确「黑客松联调」，在 state/PKCE/撤销能力补齐前不标 production-ready |
+
+## 3.1.8 · 待审批决策点
+
+| 编号 | 决策 | 建议 |
+|---|---|---|
+| AQ1 | OAuth 回调与扩展会话衔接 | **采用 Worker 公网 callback + flow_id 轮询 + 一次性应用 JWT** |
+| AQ2 | Worker 状态存储 | **KV（MVP）**；若需要强一致一次性领取再升级 Durable Object |
+| AQ3 | OAuth Token 是否下发扩展 | **绝不下发**，只留服务端；扩展仅持应用会话 JWT |
+| AQ4 | 登录方式 | **OAuth-only：彻底删除邀请码机制；只有完成知乎官方 OAuth 授权才能使用功能** |
+| AQ5 | 用户数据范围 | **只做登录身份；/user optional；五项用户接口暂不进入产品功能** |
+| AQ6 | 无 state 时是否允许联调 | **允许黑客松临时联调，但醒目标注非生产安全；正式发布门槛仍不通过** |
+| AQ7 | DIRECT 开发模式 | **保留**，本地开发无需 OAuth；分发的 PROXY 模式强制 OAuth |
+
+**审批门槛（全部满足后才开始 A0）：**
+
+- [x] AQ1～AQ7 已确认（AQ1～AQ3、AQ5～AQ7 按建议；AQ4 已明确改为 OAuth-only）
+- [x] 已确认知乎开发平台回调地址已登记：`https://api.anota.best/auth/zhihu/callback`
+- [x] 接受当前 OAuth 缺少 state（可能）、PKCE、refresh token、撤销/解绑协议，只作为黑客松联调基线
+- [x] 接受新增 Cloudflare KV/DO 作为短期状态与 OAuth 会话存储（A0 复用现有 KV，绑定名 `OAUTH_KV`）
+- [x] 确认 V3.1 不读取创作/关注/收藏等用户数据，只做登录门禁（除非另行审批）
+
+### A0 执行记录（2026-09-13）
+
+- 用户已确认知乎开发平台完成回调登记：`https://api.anota.best/auth/zhihu/callback`。
+- `api.anota.best/health` 线上返回 200，确认当前 Worker 与域名正常；OAuth callback 尚未实现，不能据此声称 OAuth 已打通。
+- Cloudflare 账号已有 KV namespace；`qiuzhen-proxy/wrangler.toml` 已绑定为 `OAUTH_KV`，供 flow/state 与服务端会话使用。
+- 当前 Worker Secret 名称基线已核对（仅名称，不读取值）；仍为 V2.8 旧认证集合，OAuth Secret 尚未写入。
+- A0 已完成：回调已登记；进入 A1。
+- OAuth 应用配置文件已确认存在（仅确认存在性，不读取/输出值）；后续按安全方式将 `app_id` 配置为 Worker 普通变量，`app_key` 配置为 Worker Secret。
+- 现有 Worker Secret 名称基线仍为 V2.8 集合；A1 只需要 `OAUTH_KV` 与公开 `app_id`，不读取 OAuth Secret 值。
+
+### A1 执行记录 ✅（2026-09-13）
+
+- 目标：实现 `/auth/zhihu/start`，生成一次性 `flow_id`/`state`，写入 `OAUTH_KV`（TTL 10 分钟），返回知乎授权地址。
+- 实现：Worker 新增 OAuth 起点；flow 主记录与 state 反查索引双写 KV；授权 URL 固定为 `https://openapi.zhihu.com/authorize`，回调固定为 `https://api.anota.best/auth/zhihu/callback`。
+- 配置：公开 `ZHIHU_OAUTH_APP_ID` 写入 Worker vars；未读取或写入 app_key、Access Secret、OAuth Token。
+- 验证：本地 `V31-A1 VERIFY 8/8`；线上 `V31-A1-ONLINE VERIFY 9/9`；dry-run 识别 `OAUTH_KV` 与 App ID；Worker 版本 `ac10fd6e-f210-4aad-a0ef-6180347bb399`。
+- A1 完成，进入 A2：实现 callback、state 校验与后端 code 换 Token。
+
+### A2 执行记录 ✅（2026-09-13）
+
+- 实现：`GET /auth/zhihu/callback`；兼容 `authorization_code`/`code`；state 反查 flow、常量时间比较、一次性删除 state 索引。
+- 换 Token：Worker 后端 POST `https://openapi.zhihu.com/access_token`，OAuth Token 只写入 `OAUTH_KV` session，不进入 HTML/URL/扩展响应。
+- 安全降级：缺 state 明确提示仅适合临时联调并拒绝建立会话；缺 app_key 时不调用上游，不伪造成功。
+- 验证：本地 `V31-A2 VERIFY 10/10`；dry-run 通过；线上缺 code/缺 state/未知 state 均 400 且无敏感字段泄露；Worker 版本 `d726b747-963d-45be-9ed8-658d18f6b49a`。
+- 真实 code 换 Token 待配置 `ZHIHU_OAUTH_APP_KEY` 后人工授权联调，当前不声称 OAuth 全链路已打通。
+
+### A4 执行记录（进行中）
+
+- 实现：扩展登录 UI 从邀请码输入改为「知乎登录」；点击后请求 Worker `/auth/zhihu/start`，新标签打开知乎官方授权页；用户本人确认后，扩展通过 `/auth/zhihu/status?flow_id=...` 轮询并领取应用 JWT。
+- OAuth Token 不进入扩展；扩展仅保存 `authMethod=zhihu_oauth` 的应用 JWT。过期后重新授权，不调用旧 refresh。
+- Worker 门禁同步收紧：JWT 必须带 `auth=zhihu_oauth`；静态 `ACCESS_TOKENS` 与旧邀请码 JWT 均不得访问业务 API。
+- 验证：本地 `V31-A4 VERIFY 14/14` + `V31-OAUTH-ONLY VERIFY 11/11`；Worker 最新部署版本 `b958aba3-a61f-481d-b1b4-6b1f5d250975`；线上起点/边界验证通过。
+- **待人工完成**：用户在知乎官方授权页点击最终确认；随后人工确认扩展登录态、重新触发求真以及未授权/退出/过期反馈。
+
+#### A4-UI · OAuth 验证反馈（2026-09-13，用户提出）
+
+目标：授权页打开后，Side Panel 不再保持静态提示，而是明确进入可感知的验证状态。
+
+| 状态 | UI 行为 | 结束条件 |
+|---|---|---|
+| 未开始 | 显示 OAuth 说明与「打开知乎授权」按钮 | 用户点击按钮 |
+| 正在验证 | 原按钮区切换为 Liquid Glass 验证模块：环形 spinner +「正在验证知乎授权」+ `已等待 Ns` 读秒；每秒更新计时 | status=authorized / error / 10 分钟超时 |
+| 验证成功 | 立即停止 spinner/计时器，刷新登录态，自动隐藏整个 `auth-panel`；若有被拦截的 Claim，继续原分析 | 应用 JWT 已成功写入 storage.local |
+| 验证失败/过期 | 停止 spinner/计时器，恢复授权按钮，显示可重试错误，不把失败当成功 | flow error/404/401/网络错误/超时 |
+
+实现原则：
+
+- 读秒只反映本地等待时间，不伪造 OAuth 进度百分比。
+- `pending` 只更新等待状态，不关闭弹窗；只有 `authorized` 且 JWT 保存成功才能自动隐藏。
+- 同时清理重复 timer，避免连续点击后多个轮询/读秒并发。
+- 动画仅使用 `transform`/`opacity`，支持 `prefers-reduced-motion` 降级。
+
+### A4-UI 执行记录 ✅（2026-09-13）
+
+- 新增 `oauth-verifying` 状态模块：spinner +「正在验证知乎授权」+ `已等待 Ns`；点击打开授权后立即进入验证动画。
+- 新增每秒读秒计时器；pending 期间保持窗口与验证状态，不会把 pending 误判为成功。
+- authorized 分支先停止轮询/读秒 timer，再自动隐藏整个 `auth-panel`，刷新登录态并重试被拦截的求真。
+- 失败、过期、取消、退出均清理 timer 并恢复授权按钮/说明；增加 `prefers-reduced-motion` 降级。
+- 验证：`V31-OAUTH-UI VERIFY 14/14`；语法全过；`smoke-search-advise.js` 45/45。
+
+### A4-UI-2 执行记录 ✅（2026-09-14）
+
+- 根因 1：Worker 原先用 `flowId` 生成 `principalId`，未调用知乎 `/user`，因此显示 `zhihu-...` 随机主体；现改为 Worker 使用 OAuth Token + Access Secret 请求 `/user`，提取 `name/Fullname/fullname/nickname`，写入应用 JWT 的 `display_name`，扩展优先显示真实用户名；资料接口失败时安全显示「已授权知乎账号」，不伪造随机昵称。
+- 根因 2：`.auth-panel { display:flex }` 覆盖浏览器 `[hidden]` 默认行为；现增加 `.auth-panel[hidden] { display:none !important }` 等显式规则。authorized 分支先停止轮询/读秒，再隐藏登录窗口并刷新登录态。
+- 验证：`V31-PROFILE-CLOSE VERIFY 14/14`；`node --check` 通过；旧 OAuth polling 与 smoke 回归保持通过。
+
+### A4-UI-3 执行记录 ✅（2026-09-14）
+
+- 发现并修复中文用户名解析问题：JWT payload 原先用 `JSON.parse(atob(...))`，中文 UTF-8 会解析失败，导致应用 JWT 不落库、登录成功 UI 不收口；现用 `Uint8Array + TextDecoder('utf-8')`，无 TextDecoder 时使用 URI fallback。
+- Worker `/user` 资料链路保留在服务端：真实 `displayName` 写入应用 JWT `display_name`；扩展只保存应用 JWT，不保存 OAuth Token。
+- `renderAuth()` 优先显示 `displayName`；资料不可用时显示「已授权知乎账号」，不再用随机 `zhihu-...` 作为用户名。
+- 修复 `.auth-panel { display:flex }` 覆盖 `hidden` 的问题：增加 `.auth-panel[hidden] { display:none !important }`；成功分支先停 timer，再隐藏登录窗口。
+- 验证：`V31-PROFILE-CLOSE-UTF8 VERIFY 17/17`；`node --check` 通过；`smoke-search-advise.js` 45/45。
+
+## V3.2 · 求深/求异知乎回答辅助材料（升级计划 · 待审批）
+
+> 用户需求（2026-09-14）：在「求深」与「求异」中仅搜索知乎回答作为辅助材料；搜索到的知乎回答必须在 UI 中显示，并允许在回答中直接引用，同时明确标注出处。
+> 本版本只扩展求深/求异；「求真」现有检索、验证、证据网络与 V3.0 动画不回退。
+
+
+## 3.2.1 · 产品边界
+
+### 求深（Deep）
+
+- 检索范围：**仅知乎回答**；禁止混入全网、学术、新闻或其他站点结果作为本功能的搜索材料。
+- 作用：为原理解释、概念拆解、知识树节点提供经验性/观点性辅助，不直接替代模型解释，也不自动视为权威事实。
+- 结果：将命中的知乎回答作为「知乎回答辅助材料」卡片展示，支持展开原文摘要、打开原回答和复制带出处引用。
+
+### 求异（Differ）
+
+- 检索范围：**仅知乎回答**；用于寻找真实的不同立场、反例、争议点或补充视角。
+- 作用：回答必须作为真实来源进入立场对照，不得由模型根据标题或搜索摘要虚构对立观点。
+- 结果：每条立场/异议观点必须绑定至少一条知乎回答来源；无可靠知乎回答时显示「未找到可引用的知乎回答」，不得伪造立场。
+
+### 明确不改变的范围
+
+- 求真继续使用现有的多引擎检索、来源评价、证据判断和证据网络；本版本不把求深/求异规则套入求真。
+- 不调用知乎创作、关注、收藏夹、收藏内容、近期收藏等用户数据接口；只通过现有搜索能力获取公开知乎回答。
+- 不把知乎回答写入 OAuth 用户档案或长期用户画像；默认只随当前分析结果短期保存。
+
+## 3.2.2 · 检索与数据契约
+
+新增统一的知乎回答材料对象（字段缺失时保持 null，不猜测）：
+
+```js
+{
+  id: 'answer-url-or-stable-id',
+  origin: 'zhihu',
+  kind: 'answer',
+  title: '回答标题或问题标题',
+  author: '作者名（若接口返回）',
+  excerpt: '可展示/可引用的原文片段',
+  url: 'https://www.zhihu.com/question/.../answer/...',
+  publishedAt: null,
+  retrievedAt: 'ISO timestamp',
+  relevance: 0,
+  stance: null,
+  quote: null
+}
+```
+
+约束：
+
+1. `origin` 固定为 `zhihu`，`kind` 固定为 `answer`；不能用 `ContentType` 猜来源。
+2. URL 必须是可打开的知乎回答 URL；只有搜索摘要、无 URL 的结果只能作为不可引用的候选，并明确标注。
+3. `excerpt`/`quote` 必须来自返回的回答内容或可验证正文；模型生成的总结必须与原文分开显示。
+4. 单条回答超过 UI 限制时截断并标注「内容已截断」，不得拼接不同回答制造新句子。
+5. 去重按规范化回答 URL/稳定 ID；同一回答不重复作为多个独立观点计数。
+6. 搜索失败、无结果、被反爬、正文不可读、字段缺失都要在 UI 如实显示，不降级为伪造材料。
+
+## 3.2.3 · 直接引用与出处规范
+
+允许在求深/求异的回答内容中直接引用知乎回答，但必须使用结构化引用块：
+
+```text
+“原回答中的连续原文……”
+—— 作者：<author>，《<title>》，知乎回答
+来源：<url>
+```
+
+规则：
+
+- 引用块与模型分析分离，视觉上使用「原文引用」标签。
+- 必须展示作者（若返回）；作者缺失时显示「作者信息未返回」，不得猜作者。
+- 必须展示可点击来源 URL；URL 缺失则禁止标记为「可直接引用」。
+- 引用内容应保持原文连续性；摘要、改写和推断不得使用引号伪装成原文。
+- 求异中引用内容旁必须显示其作用标签：`支持该立场`、`提出反例`、`补充视角` 或 `无法判定`。
+- 求深中引用内容旁必须显示其作用标签：`概念解释`、`经验补充`、`争议提示` 或 `无法判定`。
+- 不把知乎回答作者观点表述成知乎官方立场或客观事实；必要时显示「个人回答，不代表知乎官方观点」。
+
+## 3.2.4 · UI 方案
+
+### 求深
+
+- 在原有「原理解释/知识树」之后新增「知乎回答辅助材料」分区。
+- 每条卡片显示：知乎回答徽章、标题/问题、作者、原文摘要、辅助作用标签、发布时间（若有）、来源按钮。
+- 点击卡片展开完整可引用片段；提供「复制引用」按钮，复制时同时带作者、标题和 URL。
+- AI 解释中如使用某条回答，显示 `[知乎回答 1]` 内联锚点，点击定位到对应卡片。
+
+### 求异
+
+- 在立场对照卡旁新增对应的知乎回答来源卡；支持/反例/补充视角与来源一一绑定。
+- 立场没有知乎回答绑定时，禁止显示为「真实对立观点」；改显示「待知乎来源确认」。
+- 直接引用在立场卡内折叠显示，展开后包含原文、作者和来源 URL。
+- 同一回答支持多个论点时仍只计为一个来源，避免重复计数造成虚假共识。
+
+### 状态与降级
+
+| 状态 | UI 展示 |
+|---|---|
+| 搜索中 | 「正在搜索知乎回答」及进度状态，不显示空白结果区 |
+| 有结果 | 显示知乎回答卡片与可引用原文 |
+| 无结果 | 「未找到相关知乎回答」，不生成无出处替代内容 |
+| 摘要有结果但正文不可读 | 显示候选摘要，标注「暂不可直接引用」 |
+| 失败/限流/反爬 | 显示明确错误，保留主分析结果 |
+
+## 3.2.5 · 实施里程碑
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| Z0 | 审批本版本边界、数据契约、引用规范；确认求真不变 | 审批记录完成 |
+| Z1 | 求深/求异检索策略锁定为知乎回答，接入来源过滤与 URL 规范化 | 混入非知乎结果测试 0 命中 |
+| Z2 | 统一回答材料对象、去重、截断、正文/摘要可引用标记 | 数据模型行为验证 |
+| Z3 | 求深 UI 回答材料区、引用块、复制出处、内联锚点 | UI 行为验证 |
+| Z4 | 求异立场—回答绑定、反例标签、无来源禁止伪造 | 立场绑定验证 |
+| Z5 | 错误/无结果/反爬/兼容旧数据与完整回归 | 求真/求深/求异回归 |
+| Z6 | Chrome 人工验收、隐私/来源文案复核、发布记录 | 浏览器无 runtime error |
+
+## 3.2.6 · 风险与验收红线
+
+- 知乎搜索接口可能返回 `Answer` 形态但来源字段不可靠；必须以明确 `origin=zhihu`、回答 URL 和正文可验证性为准。
+- 搜索摘要不是回答原文；摘要只能标记为候选，不能放入带引号的直接引用块。
+- 知乎回答是用户观点，不代表官方事实；UI 必须保留来源性质提示。
+- 求异不得为了满足“有对立观点”而从标题/摘要推断立场；没有来源就不显示真实立场。
+- 求深不得把单个知乎回答升级成权威结论；回答仅为辅助材料。
+- 任何来源 URL、作者和引用文本都必须可追溯；无法追溯就不允许复制为正式引用。
+- 本版本不改变 OAuth Token、应用 JWT、OAuth-only 门禁和 API Secret 边界。
+
+## 3.2.7 · 待审批决策点
+
+| 编号 | 决策 | 当前建议 |
+|---|---|---|
+| ZQ1 | 求深/求异是否严格只允许知乎回答 | **是**，其他来源不进入这两个模式的辅助材料区 |
+| ZQ2 | 是否允许直接引用回答原文 | **是**，但必须带作者/标题/知乎回答 URL，且与模型总结分离 |
+| ZQ3 | 摘要无正文时是否允许引用 | **否**，只能展示为「暂不可直接引用」候选 |
+| ZQ4 | 求异无知乎来源时的展示 | 不显示真实对立观点，显示「待知乎来源确认」 |
+| ZQ5 | 是否调用 OAuth 用户数据接口 | **否**，只搜索公开知乎回答，不读取创作/关注/收藏数据 |
+| ZQ6 | 求真是否受影响 | **否**，求真保持现有多来源证据检索与验证链 |
+
+**审批门槛（全部满足后才开始 Z1）：**
+
+- [x] ZQ1～ZQ6 已确认（用户 2026-09-14 回复「按建议批准」）
+- [x] 接受知乎回答属于用户观点，不代表知乎官方或客观事实
+- [x] 接受正文不可读时不能直接引用，只能展示不可引用候选
+- [x] 接受求异无知乎来源时不生成真实对立观点
+- [x] 确认本版本只处理公开搜索结果，不新增用户数据接口权限
+
+### Z1-STEP3 执行记录 ✅（2026-09-14）
+
+- 现象根因：求深/求异第三个步骤是前端定时器推进的视觉状态，真实知乎回答读取、求异逐条判断和模型请求没有统一收口；任一异步链路长时间不返回都会表现为“构建知识关系/分析遗漏维度”一直卡住。失败后 `renderView()` 还可能再次自动启动同一模式，放大为无提示重试循环。
+- 修复：求异知乎回答观点准备限制为最多 3 条，增加 30 秒保守超时并返回空 viewpoints，不阻塞主分析；面板分析增加 150 秒 watchdog，超时进入明确 Error 状态；响应清理 watchdog；失败后不在 `renderView()` 中递归重启；重试时清除旧错误。
+- 结果：第三步不再无限等待；正常结果继续渲染，慢/失败请求显示“分析超时/请重试”，不伪造观点；求真路径不变。
+- 验证：`V32-STEP3-FIX-FRESH VERIFY 16/16`；`node --check` 全部通过；`smoke-search-advise.js` 45/45。
+
+
+## V3.3 · 求深/求异可观测工作流与实时动态可视化（升级计划 · 待审批）
+
+> 用户需求（2026-09-14）：当前求深/求异算法存在黑箱问题，且同一界面等待时间过长、缺乏及时反馈。本版本重点不是增加“炫技动画”，而是把真实工作流、阶段状态、部分结果和阻塞原因及时呈现给用户。
+> 继承 V3.2 约束：求深/求异只使用知乎公开回答作为辅助材料；求真 V3.0 直播剧场、证据网络和既有算法不回退。
+
+## 3.3.1 · 版本目标
+
+1. **可观测**：用户能够看到系统当前正在做什么、已经完成什么、下一步是什么。
+2. **实时反馈**：阶段状态由真实后台事件驱动，不再用固定定时器伪造“第三步已开始”。
+3. **部分产出**：知乎回答候选、正文读取状态、引用片段和观点判断可以边处理边显示。
+4. **可控等待**：每个阶段有心跳、耗时、超时阈值和可解释的继续/降级/取消行为。
+5. **流畅可访问**：动画使用 `transform`/`opacity` 优先，支持 `prefers-reduced-motion`，不因动效阻塞交互。
+
+## 3.3.2 · 求深/求异真实工作流
+
+### 求深工作流
+
+```text
+理解 Claim
+  → 生成知乎回答查询
+  → 搜索知乎回答
+  → 逐条读取回答正文
+  → 提取可引用片段
+  → 生成原理/概念/知识树
+  → 绑定辅助回答并完成展示
+```
+
+阶段事件至少包含：
+
+```js
+{
+  requestId,
+  mode: 'deep',
+  phase: 'zhihu_search|answer_read|quote_extract|synthesis',
+  status: 'start|heartbeat|candidate|done|error|timeout',
+  elapsedMs,
+  completed: 0,
+  total: 0,
+  detail: {}
+}
+```
+
+### 求异工作流
+
+```text
+理解 Claim
+  → 生成知乎回答查询
+  → 搜索知乎回答
+  → 筛选/去重回答
+  → 逐条读取回答正文
+  → 判断支持/反例/补充视角
+  → 绑定立场与原文引用
+  → 输出遗漏维度
+```
+
+求异必须区分：
+
+- “正在搜索知乎回答”
+- “已找到 N 条知乎回答”
+- “正在读取第 i/N 条回答”
+- “已提取可引用原文”
+- “正在判断是否构成不同立场”
+- “未找到可靠不同观点”
+
+不得把上述状态合并成一个笼统的“分析中”。
+
+## 3.3.3 · 动态可视化方案
+
+### A. 工作流时间线
+
+- 使用纵向工作流节点展示阶段顺序。
+- 当前阶段显示呼吸光点、细节摘要和实时耗时。
+- 已完成阶段显示完成勾和实际耗时。
+- 等待/阻塞阶段显示原因，例如“等待知乎回答正文”“等待模型生成”。
+- 错误阶段显示可读原因和重试/继续降级按钮。
+
+### B. 知乎回答材料流
+
+- 搜索到一条知乎回答即创建卡片，不等待所有结果。
+- 卡片状态依次为：`发现` → `读取中` → `可引用` / `暂不可引用` / `读取失败`。
+- 卡片显示知乎徽章、标题、作者、URL、读取耗时、摘要/原文片段和引用资格。
+- 求异卡片额外显示：`支持立场`、`提出反例`、`补充视角`、`无法判定`。
+- 卡片出现和状态变化只使用淡入、位移和颜色变化，不触发布局抖动。
+
+### C. 工作流图形运动
+
+- 查询生成：节点内短线粒子向知乎检索节点流动。
+- 搜索中：知乎节点显示环形进度/呼吸光晕，禁止伪造百分比。
+- 回答读取：材料卡片沿“读取队列”顺序点亮。
+- 引用提取：从回答卡片向“引用池”移动一条细线，成功后形成引用连接。
+- 立场绑定：求异回答卡片向对应立场卡连线，连线颜色表达绑定类型。
+- 所有运动必须由事件触发；没有事件时只显示心跳，不自行推进完成状态。
+
+### D. 部分结果与最终结果并存
+
+- 主结果区可在分析仍进行时显示“已生成部分内容”。
+- 部分内容必须标注“生成中”，不能伪装成最终结论。
+- 先显示回答材料，再逐步补充引用/立场绑定；最终完成后移除生成中标记。
+- 任一辅助回答失败不得清空已显示材料，也不得阻塞主分析超过阶段预算。
+
+## 3.3.4 · 等待、心跳与超时干预
+
+| 阶段 | 心跳 | 建议软超时 | 超时动作 |
+|---|---:|---:|---|
+| 知乎回答搜索 | 1s | 15s | 保留已发现回答，允许继续主分析或重试 |
+| 单条回答读取 | 1s | 12s | 标记“暂不可引用”，继续下一条 |
+| 求异立场判断 | 1s | 30s | 输出已确认立场，未完成条目标记待判断 |
+| 求深知识生成 | 1s | 60s | 展示已完成原理/概念，知识树标记生成中或失败 |
+| 求异知识生成 | 1s | 60s | 展示已完成立场与引用，遗漏维度标记生成中或失败 |
+| 整体请求 | 1s | 150s | 进入错误态，允许重新分析，不无限重启 |
+
+要求：
+
+- 心跳只能反映真实请求仍存活，不得伪造完成进度。
+- 软超时后优先采取局部降级，不让单条知乎回答拖住整体。
+- 硬超时后必须停止计时器、清理轮询和请求引用，释放 UI 状态。
+- 取消后已显示结果保留，并标记“分析已取消”。
+- 用户切换模式或 Claim 后，旧 requestId 的事件必须丢弃。
+
+## 3.3.5 · 流式输出边界
+
+MVP 优先采用**结构化阶段事件 + 增量候选卡片**，而不是直接把 DeepSeek 原始 token 流显示给用户：
+
+- 阶段事件适合表达真实 workflow，协议稳定、可测试、可恢复。
+- 知乎回答卡片可以逐条增量出现。
+- AI 原理/立场文本先以完整 JSON 字段为单位更新，避免半截 JSON 污染 UI。
+- 如果后续启用 SSE/ReadableStream，必须增加 requestId、序号、结束事件、取消和断线重连；不得把 token 直接拼进最终结论而没有结构校验。
+
+## 3.3.6 · 实施里程碑
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| V0 | 事件协议、阶段枚举、requestId/序号、心跳和超时契约 | 事件 schema 与乱序/过期测试 |
+| V1 | background/analyzer 求深/求异真实阶段上报 | 不使用固定定时器推进真实阶段 |
+| V2 | panel 工作流时间线与阶段耗时 | 每阶段状态可见、无长时间静默 |
+| V3 | 知乎回答增量卡片与读取/引用状态 | 搜索到即显示，失败不清空 |
+| V4 | 求深原理/知识树部分结果，求异立场绑定部分结果 | partial/final 状态清晰 |
+| V5 | 动态连线、粒子/光晕、减弱动效和窄栏适配 | 动画性能与可访问性检查 |
+| V6 | 超时干预、取消、重试、模式切换和旧事件丢弃 | 超时/取消/乱序行为验证 |
+| V7 | 求真回归、V3.2 引用回归、Chrome 人工验收 | 无 runtime error，三模式不回退 |
+
+## 3.3.7 · 验收红线与指标
+
+- 任何求深/求异主阶段连续 **5 秒以上无可见变化**，必须显示心跳、已耗时或阻塞原因。
+- UI 的“完成”状态只能由真实 `done` 事件或最终响应触发，不能由 CSS 定时器独立触发。
+- 搜索到的知乎回答必须在收到后尽快进入 UI，不得等到最终 LLM 完成才统一显示。
+- 摘要、原文、模型总结、立场判断必须视觉分层；没有正文不能显示“可直接引用”。
+- 求异没有知乎回答来源时，不显示虚构的真实对立观点。
+- 求真保持既有 V3.0 真实剧场、证据网络和 V2.9 结论绑定逻辑。
+- 动画不得导致主线程长任务、布局抖动或按钮不可点击；需检查 Chrome Performance 和 reduced-motion。
+- 所有超时、取消、错误路径都必须恢复可操作状态，不能停在第三个步骤。
+
+## 3.3.8 · 待审批决策点
+
+| 编号 | 决策 | 当前建议 |
+|---|---|---|
+| VQ1 | 是否采用真实阶段事件替代求深/求异固定定时器 | **是** |
+| VQ2 | 是否优先使用结构化阶段事件 + 增量回答卡片，而非原始 token 流 | **是** |
+| VQ3 | 是否允许部分结果在最终模型结果前显示 | **是**，必须带“生成中/部分结果”标记 |
+| VQ4 | 单条知乎回答读取失败是否阻塞整体 | **否**，局部标记失败并继续 |
+| VQ5 | 是否支持用户取消/继续降级/重试 | **是** |
+| VQ6 | 求真是否保持现状 | **是**，只做回归，不改求真算法 |
+
+**审批门槛（全部满足后才开始 V0）：**
+
+- [x] VQ1～VQ6 已确认（用户 2026-09-14 回复「按建议批准」）
+- [x] 接受 MVP 首先实现结构化阶段事件，不直接承诺完整 LLM token 流
+- [x] 接受部分结果必须明确标注，不能当作最终结论
+- [x] 接受单条知乎回答失败时继续整体分析
+- [x] 接受 150 秒整体硬超时与取消/重试交互
+
+### V0 执行记录 ✅（2026-09-14）
+
+- 新增 `src/core/utils/workflow-events.js`（`WCC_WORKFLOW`）：deep/differ 阶段枚举（understand/query/zhihu_search/filter/answer_read/quote_extract/stance_judge/synthesis/bind）、状态枚举（start/heartbeat/candidate/progress/done/error/timeout/cancelled）、软超时表（search 15s / read 12s / stance 30s / synthesis 60s / request 150s）。
+- `createEmitter(mode, requestId, sink)` 自动补 seq/elapsedMs/phaseElapsedMs，非法 phase/status 拒绝；`createGate(requestId)` 面板侧丢弃过期/乱序事件；`startHeartbeat` 只表示存活；`withPhaseTimeout` 软超时发 timeout 事件并 resolve 保守 fallback。
+- `message-types.js` 新增 `WORKFLOW_STAGE`；truth 不在 MODES 内，求真路径不受影响。
+- 验证：`V33-V0 VERIFY 14/14`。
+
+### V1 执行记录 ✅（2026-09-14）
+
+- `analyzer.analyze()` 新增 `opts.onWorkflow/requestId/softTimeouts`；求深：understand→query→zhihu_search(candidate 逐条)→answer_read(如实标注 snippet 级)→quote_extract→synthesis→bind；求异：understand→query→zhihu_search→filter→answer_read→stance_judge(candidate 带 url+quote)→bind→synthesis。
+- 每个 wfPhase 自动 start/heartbeat/done|error|timeout；synthesis 重试发 progress 事件；stance_judge 超时发 timeout 并返回空 viewpoints（不伪造）。
+- `background.js` importScripts 加载 workflow-events；ANALYZE 处理器新增 `workflowBroadcast` 广播 `WORKFLOW_STAGE`（带 requestId）；truth 仍只走 V3.0 `onStage`。
+- 验证：`V33-V1 VERIFY 15/15`（含超时/心跳/truth 无事件/无回调静默）；`V33-V0` 回归 14/14；`smoke` 45/45；`node --check` 通过。
+
+### V2+V3 执行记录 ✅（2026-09-14）
+
+- `panel.js` 求深/求异 loading 改为 `buildWorkflowTheater(mode)`：阶段行由 `WCC_WORKFLOW.PHASES[mode]` 生成（呼吸光点 + 名称 + 实时耗时 `.stage-time` + 细节 `.stage-sub`），**删除了 1.4s/3.6s 的 setTimeout 假推进**；状态只由 `WORKFLOW_STAGE` 事件驱动（start/candidate/progress/done/error/timeout）。
+- 事件门控：新增 `WORKFLOW_STAGE` 监听，按 `requestId===state.reqSeq`、`ev.mode===state.mode`、`createGate` seq 单调三重过滤；truth 仍走 V3.0 `ANALYZE_STAGE`。
+- 1s ticker：当前阶段耗时与标题总耗时实时刷新；同一阶段 >5s 无事件时细节行显示「仍在等待响应（已 Ns）」（红线：5s 无静默）。最终响应/硬超时均 `stopWorkflowTheater()` 清理。
+- 知乎回答增量卡片：`zhihu_search:candidate` 到达即 `appendAnswerCard`（按 url 去重、点击打开原回答、标注"摘要"）；`stance_judge:candidate` 点亮同一卡片为「不同立场 · 有原文」（title 显示原文片段）；候选区标题改为「知乎回答材料（逐条到达）」。
+- 状态文案如实：search done「共 N 条知乎回答（仅知乎回答来源）」；answer_read「摘要级材料」；quote_extract「暂无可直接引用原文」；stance done 无结果时「未找到可靠的不同观点（不伪造）」；timeout 独立黄色状态「超时（已降级继续）」。
+- CSS：阶段间纵向连接线（done 段变绿）、`.stage-time` tabular-nums、`.timeout` 状态色、进行中名称呼吸（opacity only）、回答卡蓝/立场卡橙；`prefers-reduced-motion` 关闭全部动画。
+- 修复：切换 Tab 时清 `lastError`，避免上一模式的错误阻止新模式自动分析。
+- `index.html` 引入 `workflow-events.js`。
+- 验证：`V33-V2V3 VERIFY 21/21`（jsdom 加载真实 index.html+panel.js：点击求异 Tab → 真实 emitter 事件驱动 → 卡片增量/去重/点亮、timeout 态、stale seq/异 requestId 拒绝、5s 静默提示、最终响应停 ticker）；V0 14/14、V1 15/15、Z1 11/11、OAuth UI 14/14、smoke 45/45 回归通过。
+
+### 悬浮球 SVG 图标执行记录 ✅（2026-09-14）
+
+- `src/core/content-script/orb.js`：将悬浮球中的文字「求」替换为内联 SVG 放大镜（圆形镜片 + 斜向手柄），`viewBox=0 0 48 48`，描边使用 `currentColor`。
+- 保持原有 `aria-label`、title、点击/拖动/位置记忆、READY 徽标、扫描弧、错误态和波浪装饰；错误态不再把图标改写为「!」，只切换 SVG 颜色。
+- SVG 设为 `aria-hidden`，避免与外层「求真：分析本文可验证声明」语义重复朗读；未改变悬浮球点击行为。
+- 验证：`ORB-SVG-FRESH VERIFY 14/14`；V33-V0 14/14、V1 15/15、V2/V3 21/21、smoke 45/45；`node --check` 通过。
+
+
+# 已知环境问题
 - 知乎平台 30001 频率限制窗口（无 Retry-After）：串行+缓存已缓解。
 
 # 遗留事项

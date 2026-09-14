@@ -87,6 +87,19 @@ function searchZhihu(query, count) {
     .then(function (data) { return normalizeItems(data, 'zhihu'); });
 }
 
+// V3.2 Z1：求深/求异专用——只保留知乎站内的回答结果。
+// ContentType 只用于判断内容形态；来源仍以 origin=zhihu 与回答 URL 双重约束。
+function isZhihuAnswer(item) {
+  if (!item || item.origin !== 'zhihu') return false;
+  if (String(item.sourceType || '').toLowerCase() !== 'answer') return false;
+  return /^https?:\/\/(?:www\.)?zhihu\.com\/question\/[^/?#]+\/answer\/[^/?#]+/i.test(String(item.url || ''));
+}
+function searchZhihuAnswers(query, count) {
+  return searchZhihu(query, Math.min(count || 8, 10)).then(function (items) {
+    return items.filter(isZhihuAnswer);
+  });
+}
+
 // searchGlobal(query, count) -> Promise<items[]>  知乎之外的全网来源
 function searchGlobal(query, count) {
   return apiGet('/global_search', { Query: String(query || '').slice(0, 100), Count: Math.min(count || 5, 20) })
@@ -238,6 +251,8 @@ function engineSearch(engine, query, count, opts) {
 global.WCC_DATASOURCE = {
   isAvailable: isAvailable,
   searchZhihu: searchZhihu,
+  searchZhihuAnswers: searchZhihuAnswers,
+  isZhihuAnswer: isZhihuAnswer,
   searchGlobal: searchGlobal,
   searchBoth: searchBoth,
   // V2.5 新增

@@ -6,7 +6,7 @@ release/
 node_modules/
 
 # 系统/编辑器杂项
-zhihu-skill/
+.zhihu-skill/
 docs/zhihu_OAuth_OFFICAL.md
 .DS_Store
 Thumbs.db

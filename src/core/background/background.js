@@ -1,6 +1,6 @@
 // Background Service Worker：Active Selection 的唯一中转与持久点（MV3，无独立后端——D2=B）。
 // 职责（PRD 06-技术架构 §4）：接收 CAPTURE_SELECTION → 存 storage.session → 广播/打开 Side Panel。
-importScripts('../generated-config.js', '../utils/message-types.js', '../utils/evidence-network.js', '../auth/invite-jwt.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/evidence-extractor.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/v25-pipeline.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js');
+importScripts('../generated-config.js', '../utils/message-types.js', '../utils/evidence-network.js', '../utils/workflow-events.js', '../auth/oauth-auth.js', '../ai/datasource.js', '../ai/analyzer.js', '../ai/claim-detector.js', '../ai/search-controller.js', '../ai/web-reader.js', '../ai/evidence-extractor.js', '../ai/verify-engine.js', '../ai/query-analyzer.js', '../ai/url-utils.js', '../ai/source-registry.js', '../ai/source-analyzer.js', '../ai/evidence-graph.js', '../ai/scoring-engine.js', '../ai/v25-pipeline.js', '../ai/evidence-target.js', '../ai/academic.js', '../ai/provenance.js');
 
 // ---------- Active Selection 状态 ----------
 
@@ -108,7 +108,13 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
             chrome.runtime.sendMessage({ type: WCC_MSG.ANALYZE_STAGE, requestId: reqId, stage: stage }, function () { void chrome.runtime.lastError; });
           } catch (e) { /* 面板可能已关闭 */ }
         }
-        WCC_ANALYZER.analyze(message.mode, message.payload, { onStage: stageBroadcast }).then(
+        // V3.3 V1：求深/求异真实工作流事件广播（事件自带 requestId/seq，面板按门控丢弃过期事件）
+        function workflowBroadcast(ev) {
+          try {
+            chrome.runtime.sendMessage({ type: WCC_MSG.WORKFLOW_STAGE, requestId: reqId, event: ev }, function () { void chrome.runtime.lastError; });
+          } catch (e) { /* 面板可能已关闭 */ }
+        }
+        WCC_ANALYZER.analyze(message.mode, message.payload, { onStage: stageBroadcast, onWorkflow: workflowBroadcast, requestId: reqId }).then(
           function (res) {
             sendResponse({
               ok: true,
@@ -173,17 +179,28 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse({ ok: true, pong: true, at: Date.now() });
       return false;
 
-    // ---------- V2.8 登录门禁（邀请码 + JWT） ----------
+    // ---------- V3.1 OAuth 登录 ----------
     case WCC_MSG.AUTH_LOGIN:
-      (function () {
-        var code = String((message && message.inviteCode) || '').trim();
-        if (!code) { sendResponse({ ok: false, reason: 'invite_code_required' }); return; }
-        WCC_AUTH.redeem(code).then(
-          function (r) { sendResponse({ ok: true, alias: r.alias }); },
-          function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'login_failed') }); }
-        );
-      })();
-      return true; // 异步响应
+      WCC_AUTH.startOAuth().then(
+        function (r) { sendResponse({ ok: true, flowId: r.flowId, authorizeUrl: r.authorizeUrl, expiresIn: r.expiresIn }); },
+        function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'oauth_start_failed') }); }
+      );
+      return true;
+
+    case WCC_MSG.AUTH_OAUTH_POLL:
+      WCC_AUTH.checkOAuth(String(message.flowId || '')).then(
+        function (r) {
+          if (r.status === 'authorized') {
+            // 领取动作必须在短消息内完成；不持有长连接。
+            return WCC_AUTH.acceptOAuth(r).then(function (accepted) {
+              sendResponse({ ok: true, status: 'authorized', alias: accepted.alias, displayName: accepted.displayName, zhihuUserId: accepted.zhihuUserId, authMethod: accepted.authMethod });
+            });
+          }
+          sendResponse({ ok: true, status: 'pending' });
+        },
+        function (err) { sendResponse({ ok: false, reason: String(err && err.code || err.message || 'oauth_status_failed') }); }
+      );
+      return true;
 
     case WCC_MSG.AUTH_STATE:
       WCC_AUTH.getAuthState().then(
@@ -228,7 +245,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         (function (claim) {
           // 求异查询加对立倾向词，扩大不同立场召回
           var differClaim = Object.assign({}, claim);
-          WCC_SEARCH_CONTROLLER.searchForClaim(differClaim).then(function (searchRes) {
+          WCC_SEARCH_CONTROLLER.searchForClaim(differClaim, { zhihuAnswersOnly: true }).then(function (searchRes) {
             return WCC_VERIFY_ENGINE.discoverDifferViewpoints(claim, searchRes.candidates);
           }).then(
             function (result) { sendResponse({ ok: true, differ: result }); },

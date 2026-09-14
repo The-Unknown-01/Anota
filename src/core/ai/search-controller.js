@@ -189,14 +189,16 @@
     var hint = SR_QUERY_HINTS[claim.sourceRequirement] || '';
     var secondary = hint ? (primary + ' ' + hint).slice(0, 80) : '';
 
-    var zhihuP = ds.searchZhihu(primary, 5).catch(function () { return []; });
-    var globP = ds.searchGlobal(secondary || primary, 5).catch(function () { return []; });
+    var answersOnly = options.zhihuAnswersOnly === true;
+    var zhihuP = (answersOnly && ds.searchZhihuAnswers ? ds.searchZhihuAnswers(primary, 8) : ds.searchZhihu(primary, 5)).catch(function () { return []; });
+    var globP = answersOnly ? Promise.resolve([]) : ds.searchGlobal(secondary || primary, 5).catch(function () { return []; });
 
     return Promise.all([zhihuP, globP]).then(function (r) {
       var seen = {};
       var candidates = [];
       r[0].forEach(function (it) { candidates.push(Object.assign({ origin: 'zhihu' }, it)); });
       r[1].forEach(function (it) { candidates.push(Object.assign({ origin: 'global' }, it)); });
+      if (answersOnly && ds.isZhihuAnswer) candidates = candidates.filter(ds.isZhihuAnswer);
 
       // 去重（同 URL 保留先出现的=知乎通道优先）
       candidates = candidates.filter(function (c) {
@@ -220,7 +222,8 @@
       return {
         candidates: candidates,
         queries: { primary: primary, secondary: secondary },
-        reason: 'ok'
+        reason: answersOnly ? 'zhihu_answers_only' : 'ok',
+        sourcePolicy: answersOnly ? 'zhihu_answers_only' : 'mixed'
       };
     });
   }

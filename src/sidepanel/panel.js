@@ -39,10 +39,11 @@
     docIndex: null,       // 本文 Claim Index（U4 概览态）
     mode: 'truth',        // 当前 Tab
     results: {},          // mode -> { result, cached }
-    verified: {},         // claimId -> supportLevel（概览已核实统计）
+    verified: {},         // claimId -> supportLevel（概览"已查看"计数；仅表查看行为，与证据核验结论解耦）
     analyzing: false,
     seq: 0,               // 丢弃过期响应（连续深读时旧响应作废）
-    reqSeq: 0             // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
+    reqSeq: 0,            // V3.0：分析请求序号（ANALYZE_STAGE 事件按此路由）
+    deepRead: { seq: 0, busy: false, lastConcept: null, treeNames: [] } // V3.1：求深·上下文深读状态
   };
 
   var CLAIM_TYPE_NAMES = { fact: '事实', number: '数字', causal: '因果', compare: '比较', predict: '预测', define: '定义', person: '人物事件', other: '其他', opinion: '观点' };
@@ -52,6 +53,7 @@
     person: '人物事件', opinion: '观点', rhetoric: '修辞'
   };
 
+  var analysisTimeoutTimer = null;
   var LOADING_STEPS = {
     truth: ['解析当前 Claim', '检索相关知识', '核对表述与证据'],
     deep: ['解析当前 Claim', '梳理相关概念', '构建知识关系'],
@@ -321,8 +323,12 @@
         ? (cached.cached ? '已核验 · 缓存' : '已核验')
         : (cached.cached ? '未联网核验 · 缓存' : '未联网核验');
     } else {
-      // 该模式尚未分析：自动触发
-      startAnalysis(state.mode);
+      // 该模式尚未分析：自动触发；失败后由 error state 接管，不在 renderView 中递归重试
+      if (!state.analyzing && state.lastError) {
+        showError(state.lastError);
+      } else {
+        startAnalysis(state.mode);
+      }
     }
   }
 
@@ -334,37 +340,167 @@
       show(els.loading);
       return;
     }
-    // deep/differ：轻量步骤提示（V3.0 M2 再接入事件直播）
+    // V3.3 V2：deep/differ 真实工作流时间线（由 WORKFLOW_STAGE 事件驱动；不再 setTimeout 假推进）
     els.loadingTitle.textContent = MODE_NAMES[state.mode] + '分析中……';
-    els.loadingSteps.innerHTML = '';
-    LOADING_STEPS[state.mode].forEach(function (s, i) {
-      var li = document.createElement('li');
-      li.className = i === 0 ? 'doing' : (i === 1 ? 'todo' : 'todo');
-      li.textContent = s;
-      els.loadingSteps.appendChild(li);
-    });
-    // 分步推进的视觉节奏（真实进度不可知，但状态可感知）
-    var stepEls = [].slice.call(els.loadingSteps.children);
-    setTimeout(function () { stepEls[0] && stepEls[0].classList.replace('doing', 'done'); stepEls[1] && stepEls[1].classList.replace('todo', 'doing'); }, 1400);
-    setTimeout(function () { stepEls[1] && stepEls[1].classList.replace('doing', 'done'); stepEls[2] && stepEls[2].classList.replace('todo', 'doing'); }, 3600);
+    buildWorkflowTheater(state.mode);
     show(els.loading);
+  }
+
+  // ---------- V3.3 V2/V3：求深/求异工作流剧场 ----------
+  var wfTheater = {};       // phase -> { row, sub, time }
+  var wfGate = null;        // WCC_WORKFLOW.createGate(requestId)
+  var wfTicker = null;      // 1s 心跳/耗时刷新
+  var wfLast = { phase: null, at: 0, startedAt: 0 };
+  var wfAnswerSeen = {};    // url -> li（知乎回答增量卡片去重）
+  var wfAnswerCount = 0;
+
+  var WF_STATUS_ZH = { start: '进行中', heartbeat: '进行中', candidate: '进行中', progress: '进行中', done: '完成', error: '失败', timeout: '超时（已降级继续）', cancelled: '已取消' };
+
+  function fmtSec(ms) { return (Math.max(0, ms) / 1000).toFixed(ms < 10000 ? 1 : 0) + 's'; }
+
+  function buildWorkflowTheater(mode) {
+    if (!els.loadingSteps) return;
+    els.loadingSteps.innerHTML = '';
+    wfTheater = {}; wfAnswerSeen = {}; wfAnswerCount = 0;
+    resetPreview();
+    if (candidateList && candidateList.previousElementSibling) candidateList.previousElementSibling.textContent = '知乎回答材料（逐条到达）';
+    var WF = window.WCC_WORKFLOW;
+    wfGate = WF ? WF.createGate(state.reqSeq) : null;
+    wfLast = { phase: null, at: Date.now(), startedAt: Date.now() };
+    var phases = (WF && WF.PHASES[mode]) || [];
+    phases.forEach(function (p, i) {
+      var li = document.createElement('li');
+      li.className = 'stage wf' + (i === 0 ? ' doing' : '');
+      li.dataset.phase = p.id;
+      var dot = el('span', 'stage-dot');
+      var name = el('span', 'stage-name', p.label);
+      var time = el('span', 'stage-time', '');
+      var sub = el('span', 'stage-sub', p.hint);
+      li.appendChild(dot); li.appendChild(name); li.appendChild(time); li.appendChild(sub);
+      els.loadingSteps.appendChild(li);
+      wfTheater[p.id] = { row: li, sub: sub, time: time, hint: p.hint, startedAt: i === 0 ? Date.now() : 0 };
+    });
+    if (wfTicker) clearInterval(wfTicker);
+    wfTicker = setInterval(tickWorkflow, 1000);
+  }
+
+  function stopWorkflowTheater() {
+    if (wfTicker) { clearInterval(wfTicker); wfTicker = null; }
+    wfGate = null;
+  }
+
+  // 每秒刷新：当前阶段耗时；>5s 无事件时显示"仍在等待"提示（红线：不允许 5s 静默）
+  function tickWorkflow() {
+    if (!state.analyzing || state.mode === 'truth') { stopWorkflowTheater(); return; }
+    var now = Date.now();
+    Object.keys(wfTheater).forEach(function (id) {
+      var t = wfTheater[id];
+      if (t.row.classList.contains('doing') && t.startedAt) t.time.textContent = fmtSec(now - t.startedAt);
+    });
+    var cur = wfLast.phase && wfTheater[wfLast.phase];
+    if (cur && cur.row.classList.contains('doing') && now - wfLast.at > 5000) {
+      cur.sub.textContent = cur.hint + ' · 仍在等待响应（已 ' + fmtSec(now - cur.startedAt) + '）';
+    }
+    var total = els.loadingTitle;
+    if (total) total.textContent = MODE_NAMES[state.mode] + '分析中…… ' + fmtSec(now - wfLast.startedAt);
+  }
+
+  function wfSubText(ev) {
+    var d = ev.detail || {};
+    switch (ev.phase) {
+      case 'understand': return ev.status === 'done' ? '已理解目标 · ' + (d.textLength || 0) + ' 字' : null;
+      case 'query': return d.query ? '检索词：' + d.query : null;
+      case 'zhihu_search':
+        if (ev.status === 'candidate') return '已找到 ' + (ev.completed || 0) + (ev.total ? '/' + ev.total : '') + ' 条知乎回答';
+        if (ev.status === 'done') return '共 ' + (d.count || 0) + ' 条知乎回答（仅知乎回答来源）';
+        if (ev.status === 'timeout') return '搜索超时，保留已发现回答继续';
+        return null;
+      case 'filter': return ev.status === 'done' ? '保留 ' + (d.kept || 0) + ' 条' + (d.dropped ? '，略过 ' + d.dropped + ' 条' : '') : null;
+      case 'answer_read':
+        if (ev.status === 'done') return (d.level === 'snippet' ? '摘要级材料 · ' : '已读取 ') + (d.total || 0) + ' 条';
+        if (ev.status === 'start') return '读取 ' + (d.total || 0) + ' 条回答正文……';
+        return null;
+      case 'quote_extract': return ev.status === 'done' ? (d.quotable ? '可引用片段 ' + d.quotable + ' 条' : '当前为摘要级材料，暂无可直接引用原文') : null;
+      case 'stance_judge':
+        if (ev.status === 'candidate') return '已确认 ' + (ev.completed || 0) + '/' + (ev.total || 0) + ' 个不同立场';
+        if (ev.status === 'done') return d.count ? '找到 ' + d.count + ' 个有出处的不同立场' : '未找到可靠的不同观点（不伪造）';
+        if (ev.status === 'timeout') return '立场判断超时，仅保留已确认项';
+        return null;
+      case 'bind': return ev.status === 'done' ? '已绑定 ' + (d.bound != null ? d.bound : (d.answers != null ? d.answers : 0)) + ' 条知乎回答出处' : null;
+      case 'synthesis':
+        if (ev.status === 'progress' && d.retry) return '模型输出格式修正中（重试一次）';
+        if (ev.status === 'done') return '模型生成完成';
+        return '等待模型生成……';
+      default: return null;
+    }
+  }
+
+  function applyWorkflowEvent(ev) {
+    var t = wfTheater[ev.phase];
+    if (!t) return;
+    var now = Date.now();
+    wfLast.phase = ev.phase; wfLast.at = now;
+    if (ev.status === 'heartbeat') { if (!t.startedAt) t.startedAt = now; return; }
+    if (ev.status === 'start') {
+      t.startedAt = now;
+      t.row.classList.remove('done', 'error', 'timeout'); t.row.classList.add('doing');
+      t.sub.textContent = t.hint;
+      return;
+    }
+    if (ev.status === 'candidate' || ev.status === 'progress') {
+      t.row.classList.add('doing');
+      var s = wfSubText(ev); if (s) t.sub.textContent = s;
+      if (ev.detail && ev.detail.answer) appendAnswerCard(ev.detail.answer, ev.phase === 'stance_judge' ? 'stance' : 'found');
+      return;
+    }
+    t.row.classList.remove('doing');
+    t.row.classList.add(ev.status === 'done' ? 'done' : ev.status === 'timeout' ? 'timeout' : 'error');
+    t.time.textContent = fmtSec(t.startedAt ? now - t.startedAt : ev.phaseElapsedMs || 0);
+    t.sub.textContent = wfSubText(ev) || (ev.status === 'done' ? '完成' : ev.status === 'timeout' ? '超时（已降级继续）' : ('此步未成功' + (ev.detail && ev.detail.error ? '：' + ev.detail.error : '')));
+  }
+
+  // V3.3 V3：知乎回答增量卡片（found=发现/摘要级；stance=已绑定不同立场）
+  function appendAnswerCard(ans, kind) {
+    if (!candidateList || !ans || !(ans.url || ans.title)) return;
+    if (previewBox) previewBox.hidden = false;
+    var key = ans.url || ans.title;
+    var li = wfAnswerSeen[key];
+    if (!li) {
+      li = document.createElement('li');
+      li.className = 'cand ans dim';
+      var type = el('span', 'cand-type', '知乎回答');
+      var title = el('span', 'cand-title', ans.title || ans.url);
+      title.title = ans.url || '';
+      var meta = el('span', 'cand-meta', '摘要');
+      li.appendChild(type); li.appendChild(title); li.appendChild(meta);
+      if (ans.url) { li.style.cursor = 'pointer'; li.addEventListener('click', function () { chrome.tabs.create({ url: ans.url }); }); }
+      candidateList.appendChild(li);
+      wfAnswerSeen[key] = li; wfAnswerCount++;
+    }
+    if (kind === 'stance') {
+      li.classList.remove('dim'); li.classList.add('lit', 'stance');
+      li.querySelector('.cand-meta').textContent = '不同立场 · 有原文';
+      if (ans.quote) li.title = '原文：' + ans.quote;
+    }
   }
 
   function showError(reason) {
     var map = {
       config_missing: ['未配置 API Key', '请在项目根放置 deepseek_api.key 并运行 node scripts/gen-config.js，然后重新加载扩展'],
-      needs_login: ['需要登录', '请点击右上角「登录」输入邀请码后使用'],
+      needs_login: ['需要知乎登录', '请点击右上角「知乎登录」，完成知乎官方授权后使用'],
       http_401: ['鉴权失败', 'API Key 无效或已过期'],
       http_402: ['额度不足', 'DeepSeek 账户余额不足'],
       http_429: ['请求过于频繁', '请稍后再试'],
-      abort: ['请求超时', '网络较慢或服务繁忙，请重试']
+      error: ['分析超时', '知乎回答检索或正文读取时间过长，请稍后重试'],
+      analysis_timeout: ['分析超时', '知乎回答检索或正文读取时间过长，请稍后重试'],
+    no_response: ['分析未返回', '分析请求没有返回结果，请重试'],
     };
     var m = map[reason] || ['暂时无法完成深读', reason || '未知错误'];
     els.errorTitle.textContent = m[0];
     els.errorDetail.textContent = m[1];
     hide(els.result); hide(els.loading);
     show(els.error);
-    // V2.8：未登录时自动展开登录弹层，引导输入邀请码
+    // V3.1 OAuth-only：未登录时自动展开 OAuth 引导弹层
     if (reason === 'needs_login') openAuthPanel();
   }
 
@@ -373,10 +509,20 @@
   function startAnalysis(mode, force) {
     var seq = ++state.seq;
     if (force) delete state.results[mode];
+    state.lastError = null;
     state.analyzing = true;
     state.mode = mode;
     state.reqSeq = (state.reqSeq || 0) + 1; // V3.0：本请求的舞台事件序号
     var myReq = state.reqSeq;
+    if (analysisTimeoutTimer) clearTimeout(analysisTimeoutTimer);
+    analysisTimeoutTimer = setTimeout(function () {
+      if (seq !== state.seq || myReq !== state.reqSeq || !state.analyzing) return;
+      state.analyzing = false;
+      state.results[mode] = null;
+      state.lastError = 'analysis_timeout';
+      stopWorkflowTheater();
+      showError('analysis_timeout');
+    }, 150000);
     renderView();
     try {
       chrome.runtime.sendMessage(
@@ -384,6 +530,8 @@
         function (resp) {
           void chrome.runtime.lastError;
           if (seq !== state.seq) return; // 已有新 Claim/模式，丢弃过期响应
+          if (analysisTimeoutTimer) { clearTimeout(analysisTimeoutTimer); analysisTimeoutTimer = null; }
+          stopWorkflowTheater();
           state.analyzing = false;
           if (resp && resp.ok) {
             state.results[mode] = {
@@ -419,10 +567,8 @@
     return e;
   }
 
-  var SUPPORT_BADGES = {
-    supported: '✓ 有较充分证据支持', partial: '🟡 部分支持',
-    insufficient: '⚠️ 证据不足', unsupported: '✕ 不支持', opinion: '◎ 观点表达'
-  };
+  // need.md：本界面不再向用户展示"有较充分证据支持"等证据充分度标签。
+  // 证据检索/评分/来源分析等系统内部能力保持不动；此 map 原为这些废弃 UI 标签服务，已删除。
 
   function cardWith(label) {
     var c = el('div', 'card glass');
@@ -453,7 +599,6 @@
     var wrapper = el('div', 'net-wrap');
     // —— 结论节点 ——
     var concl = el('div', 'net-conclusion');
-    concl.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
     concl.appendChild(el('div', 'net-conclusion-text', esc(model.summary || result.summary || '')));
     // 数字绑定总览：结论声称的数字 vs 支持证据中实际找到的
     if (model.claimedTokens.length) {
@@ -544,8 +689,7 @@
   function renderTruth(result, entry) {
     var pane = els.panes.truth;
     pane.innerHTML = '';
-    var c1 = cardWith('支持程度');
-    c1.appendChild(el('span', 'badge ' + esc(result.supportLevel), SUPPORT_BADGES[result.supportLevel] || result.supportLevel));
+    var c1 = cardWith('摘要');
     c1.appendChild(el('div', 'summary-text', esc(result.summary)));
     // V2.5：策略与证据统计行（问题类型/引擎/独立证据数）+ upgrade.md Binding 状态
     var st = entry && entry.verification && entry.verification.strategy;
@@ -664,20 +808,151 @@
     pane.appendChild(c3);
   }
 
-  // ---------- 探索循环（PRD 04 §8 / 05 §14.3）：知识节点点击 → 成为新 Claim 重新三连探索 ----------
+  // ---------- V3.1：上下文深读（add.md §4~§19） ----------
+  // concept 是被深读的对象，context（当前 Claim/文章）是决定如何深读它的关键。
+  // 点击关键词：只局部更新求深内容区 —— 不换 Claim、不刷整页、保留其它关键词；
+  // 竞态由 deepRead.seq 保证：只有最后一次点击对应的请求能写结果。
 
-  function exploreNode(text) {
-    var t = String(text || '').trim();
-    if (!t || !state.claimPayload) return;
-    showClaim({
-      title: String(state.claimPayload.title || '').replace(/ · 知识探索$/, '') + ' · 知识探索',
-      url: state.claimPayload.url,
-      selectedText: t,
-      capturedAt: new Date().toISOString()
+  // 组装"深读某概念"的请求文本：把概念放回当前阅读语境
+  function deepKeywordText(concept) {
+    var cp = state.claimPayload || {};
+    return [
+      '【用户当前阅读的内容】',
+      String(cp.selectedText || ''),
+      cp.title ? ('【文章标题】' + String(cp.title)) : '',
+      '【深读目标概念】' + String(concept || '').trim(),
+      '',
+      '请把概念「' + String(concept || '').trim() + '」放回上述阅读语境中深读，输出：',
+      '1) 该概念的基本含义；2) 它在当前内容中对应的具体人物/事件/机构/对象（能确定才写，不能确定就如实说明）；',
+      '3) 它在此语境中的作用、意义或影响；4) 为什么这个概念会出现在当前内容的知识树中。',
+      '结论必须紧扣当前内容，禁止输出脱离语境的百科式定义。'
+    ].join('\n');
+  }
+
+  // 收集一次整篇求深结果里的全部关键词（根/分支节点/概念名），供"继续探索"复用
+  function conceptNamesFromDeep(result) {
+    var names = [];
+    var seen = {};
+    function add(n) {
+      n = String(n || '').trim();
+      if (n && !seen[n]) { seen[n] = true; names.push(n); }
+    }
+    var tree = (result && result.tree) || {};
+    if (tree.root) add(tree.root);
+    (Array.isArray(tree.branches) ? tree.branches : []).forEach(function (br) {
+      if (br && br.label) add(br.label);
+      (Array.isArray(br.nodes) ? br.nodes : []).forEach(function (n) { add(n); });
     });
+    (Array.isArray(result && result.concepts) ? result.concepts : []).forEach(function (c) { add(c && c.name); });
+    return names;
+  }
+
+  // 可点击关键词 chip（深读入口；交互状态由 .loading/.visited/.selected 表达，无 ↗）
+  function makeKeywordChip(name, cls) {
+    var chip = el('span', 'node-chip' + (cls ? ' ' + cls : ''), esc(name));
+    chip.title = '结合当前内容深读此概念';
+    chip.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      deepReadNode(name);
+    });
+    return chip;
+  }
+
+  // "继续探索"关键词组（当前已读概念除外）
+  function renderExploreChips(container, exclude) {
+    var names = (state.deepRead.treeNames || []).filter(function (n) { return n !== exclude; });
+    if (!names.length) return;
+    var wrap = el('div', 'tree-nodes');
+    names.forEach(function (n) { wrap.appendChild(makeKeywordChip(n)); });
+    container.appendChild(wrap);
+  }
+
+  // 上下文深读主入口：发求深请求 → 局部更新求深区
+  function deepReadNode(concept) {
+    var t = String(concept || '').trim();
+    if (!t || !state.claimPayload || state.mode !== 'deep') return;
+    var seq = ++state.deepRead.seq;
+    state.deepRead.lastConcept = t;
+    state.deepRead.busy = true;
+    renderDeepLoading(t);
+    var payload = Object.assign({}, state.claimPayload, { selectedText: deepKeywordText(t) });
+    chrome.runtime.sendMessage(
+      { type: WCC_MSG.ANALYZE, mode: 'deep', payload: payload },
+      function (resp) {
+        void chrome.runtime.lastError;
+        if (seq !== state.deepRead.seq || state.mode !== 'deep' || !state.claimPayload) return; // 过期/已切走：丢弃
+        state.deepRead.busy = false;
+        if (resp && resp.ok && resp.analysis && resp.analysis.result) {
+          renderDeepConceptResult(t, resp.analysis.result);
+        } else {
+          renderDeepConceptError(t, (resp && resp.reason) || 'no_response');
+        }
+      }
+    );
+  }
+
+  // 求深局部：加载态（旧内容让位给轻量 spinner）
+  function renderDeepLoading(concept) {
+    var pane = els.panes.deep;
+    pane.innerHTML = '';
+    var row = el('div', 'deep-loading');
+    row.appendChild(el('span', 'spinner', ''));
+    row.appendChild(el('span', '', '正在结合当前内容分析「' + esc(concept) + '」……'));
+    pane.appendChild(row);
+  }
+
+  // 求深局部：新深读结果（淡入），底部保留其它关键词继续探索
+  function renderDeepConceptResult(concept, result) {
+    var pane = els.panes.deep;
+    pane.innerHTML = '';
+    var live = el('div', 'deep-fade');
+    var cHead = cardWith('深读：' + esc(concept));
+    cHead.appendChild(el('div', 'tree-root', '结合当前阅读语境'));
+    live.appendChild(cHead);
+    if (result && result.principle) {
+      var cB = cardWith('基本定义与当前语境');
+      cB.appendChild(el('div', 'summary-text', esc(result.principle)));
+      live.appendChild(cB);
+    }
+    var concepts = Array.isArray(result && result.concepts) ? result.concepts : [];
+    if (concepts.length) {
+      var cC = cardWith('相关概念');
+      concepts.forEach(function (cp) {
+        var line = el('div', 'concept-line');
+        line.appendChild(makeKeywordChip(cp && cp.name));
+        line.appendChild(el('span', 'muted', esc(cp && cp.description)));
+        cC.appendChild(line);
+      });
+      live.appendChild(cC);
+    }
+    var cD = cardWith('继续探索');
+    renderExploreChips(cD, concept);
+    live.appendChild(cD);
+    pane.appendChild(live);
+  }
+
+  // 求深局部：失败 → 恢复整篇视图 + 顶部错误条，可重试，不空白
+  function renderDeepConceptError(concept, reason) {
+    var pane = els.panes.deep;
+    if (state.results.deep && state.results.deep.result) {
+      renderDeep(state.results.deep.result);
+    } else {
+      pane.innerHTML = '';
+    }
+    var box = el('div', 'deep-error');
+    box.appendChild(el('span', '', '「' + esc(concept) + '」深读失败' +
+      (reason && reason !== 'no_response' ? '（' + esc(reason) + '）' : '') + '，请重试。'));
+    var retry = el('button', '', '重试');
+    retry.addEventListener('click', function () { deepReadNode(concept); });
+    box.appendChild(retry);
+    pane.insertBefore(box, pane.firstChild);
   }
 
   function renderDeep(result) {
+    // 整篇求深视图：作废在途局部深读请求并记录原始关键词（供"继续探索"恢复）
+    state.deepRead.seq++;
+    state.deepRead.busy = false;
+    state.deepRead.treeNames = conceptNamesFromDeep(result);
     var pane = els.panes.deep;
     pane.innerHTML = '';
     var c1 = cardWith('背后的原理');
@@ -689,7 +964,7 @@
       var c2 = cardWith('相关概念');
       concepts.forEach(function (cp) {
         var line = el('div', 'concept-line');
-        line.appendChild(el('span', 'concept-name', esc(cp.name)));
+        line.appendChild(makeKeywordChip(cp.name));
         line.appendChild(el('span', 'muted', esc(cp.description)));
         c2.appendChild(line);
       });
@@ -699,16 +974,15 @@
     var tree = result.tree || {};
     var c3 = cardWith('知识树');
     if (tree.root) {
-      c3.appendChild(el('div', '', '')).appendChild(el('span', 'tree-root', esc(tree.root)));
+      var rootLine = el('div', '');
+      rootLine.appendChild(el('span', 'tree-root', esc(tree.root)));
+      c3.appendChild(rootLine);
       (Array.isArray(tree.branches) ? tree.branches : []).forEach(function (br) {
         var branch = el('div', 'tree-branch');
         branch.appendChild(el('div', 'tree-label', esc(br.label)));
         var nodesWrap = el('div', 'tree-nodes');
         (Array.isArray(br.nodes) ? br.nodes : []).forEach(function (n) {
-          var chip = el('span', 'node-chip', esc(n));
-          chip.title = '以此节点继续深读';
-          chip.addEventListener('click', function () { exploreNode(n); });
-          nodesWrap.appendChild(chip);
+          nodesWrap.appendChild(makeKeywordChip(n));
         });
         branch.appendChild(nodesWrap);
         c3.appendChild(branch);
@@ -720,7 +994,7 @@
 
     var qs = Array.isArray(result.questions) ? result.questions : [];
     if (qs.length) {
-      var c4 = cardWith('继续探索');
+      var c4 = cardWith('相关问题（点击复制）');
       var ul = el('ul', 'q-list');
       qs.forEach(function (q) {
         var li = el('li', 'q-link', esc(q));
@@ -786,27 +1060,37 @@
     var objectStats = index.objectStats || {};
     els.ovTitle.textContent = di.title || '本文';
     els.ovStats.innerHTML = '';
-    // v2：信息对象分布统计（升级要求 §2）+ 已核实计数
-    var stats = [
-      { label: '可溯源声明', n: claims.length, cls: '' },
-      { label: '已核实', n: Object.keys(state.verified).length, cls: '' }
+    // need.md：概览统计分两层 —— 核心状态（可溯源声明/已查看）与内容分类，避免全部同权平铺。
+    // "已查看"只表达用户查看行为，数字逻辑沿用原"已核实"计数（state.verified 内部键名保留）。
+    var coreStats = [
+      { label: '可溯源声明', n: claims.length },
+      { label: '已查看', n: Object.keys(state.verified).length }
     ];
+    var catStats = [];
     Object.keys(objectStats).forEach(function (ot) {
-      if (objectStats[ot] > 0) stats.push({ label: OBJECT_TYPE_NAMES[ot] || ot, n: objectStats[ot], cls: '' });
+      if (objectStats[ot] > 0) catStats.push({ label: OBJECT_TYPE_NAMES[ot] || ot, n: objectStats[ot] });
     });
-    stats.forEach(function (s) {
+    function statSpan(s) {
       var span = el('span', 'ov-stat');
       span.innerHTML = esc(s.label) + ' <b>' + s.n + '</b>';
-      els.ovStats.appendChild(span);
-    });
+      return span;
+    }
+    var coreRow = el('div', 'ov-stats-core');
+    coreStats.forEach(function (s) { coreRow.appendChild(statSpan(s)); });
+    els.ovStats.appendChild(coreRow);
+    if (catStats.length) {
+      els.ovStats.appendChild(el('div', 'ov-group-label', '内容分类'));
+      var catRow = el('div', 'ov-stats-cats');
+      catStats.forEach(function (s) { catRow.appendChild(statSpan(s)); });
+      els.ovStats.appendChild(catRow);
+    }
     els.ovList.innerHTML = '';
     claims.forEach(function (claim) {
       var item = el('button', 'ov-item glass');
       var head = el('div', 'ov-item-head');
       head.appendChild(el('span', 'ov-type', CLAIM_TYPE_NAMES[claim.type] || '声明'));
       head.appendChild(el('span', 'ov-obj', OBJECT_TYPE_NAMES[claim.objectType] || ''));
-      var v = state.verified[claim.id];
-      if (v) head.appendChild(el('span', 'ov-verified', SUPPORT_BADGES[v] || v));
+      // need.md：概览/列表不展示证据支持状态；"已查看"仅以顶部统计数字表达，与证据核验结论解耦
       item.appendChild(head);
       item.appendChild(el('div', 'ov-text', esc(claim.text)));
       item.addEventListener('click', function () {
@@ -858,6 +1142,7 @@
       state.results = {};   // 新 Claim 清空三模式缓存结果
       state.analyzing = false;
       state.seq++;          // 作废在途响应
+      state.deepRead.seq++; state.deepRead.busy = false; state.deepRead.lastConcept = null; state.deepRead.treeNames = []; // 作废在途局部深读
     }
 
     var text = String(payload.selectedText || '');
@@ -883,6 +1168,7 @@
   els.tabs.addEventListener('click', function (e) {
     var tab = e.target.closest('.tab');
     if (!tab) return;
+    if (tab.dataset.mode !== state.mode) state.lastError = null; // 切换模式：上一模式的错误不阻止新模式自动分析
     state.mode = tab.dataset.mode;
     [].forEach.call(els.tabs.querySelectorAll('.tab'), function (t) {
       var active = t === tab;
@@ -962,18 +1248,24 @@
     document.body.prepend(wrap);
   })();
 
-  // ---------- V2.8 登录门禁（邀请码 + JWT；仅代理模式显示入口） ----------
+  // ---------- V3.1 OAuth-only 登录门禁（仅代理模式显示入口） ----------
 
   var authArea = document.getElementById('auth-area');
   var authLoginBtn = document.getElementById('auth-login-btn');
   var authUser = document.getElementById('auth-user');
   var authLogoutBtn = document.getElementById('auth-logout-btn');
   var authPanel = document.getElementById('auth-panel');
-  var authInput = document.getElementById('auth-code-input');
   var authSubmit = document.getElementById('auth-submit');
   var authCancel = document.getElementById('auth-cancel');
   var authError = document.getElementById('auth-error');
   var authHint = document.getElementById('auth-hint');
+  var oauthCopy = document.getElementById('oauth-copy');
+  var oauthVerifying = document.getElementById('oauth-verifying');
+  var oauthElapsed = document.getElementById('oauth-elapsed');
+  var authPollTimer = null;
+  var authElapsedTimer = null;
+  var authPollStartedAt = 0;
+  var suppressAuthAutoOpen = false; // 手动登录后抑制 refreshAuthState 的自动弹层
 
   function renderAuth(state) {
     if (!authArea) return;
@@ -983,7 +1275,38 @@
     authLoginBtn.hidden = !!state.loggedIn;
     authUser.hidden = !state.loggedIn;
     authLogoutBtn.hidden = !state.loggedIn;
-    if (state.loggedIn) authUser.textContent = state.alias || '已登录';
+    if (state.loggedIn) authUser.textContent = state.displayName || state.alias || '已授权知乎账号';
+  }
+
+  function stopOAuthWaiting() {
+    if (authPollTimer) { clearTimeout(authPollTimer); authPollTimer = null; }
+    if (authElapsedTimer) { clearInterval(authElapsedTimer); authElapsedTimer = null; }
+    if (oauthVerifying) oauthVerifying.hidden = true;
+    if (oauthCopy) oauthCopy.hidden = false;
+    if (oauthElapsed) oauthElapsed.textContent = '已等待 0 秒';
+  }
+
+  function startOAuthWaiting() {
+    stopOAuthWaiting();
+    authPollStartedAt = Date.now();
+    if (oauthVerifying) oauthVerifying.hidden = false;
+    if (oauthCopy) oauthCopy.hidden = true;
+    if (authSubmit) authSubmit.hidden = true;
+    if (authCancel) authCancel.hidden = true;
+    if (authHint) authHint.hidden = true;
+    function updateElapsed() {
+      if (!oauthElapsed) return;
+      var seconds = Math.max(0, Math.floor((Date.now() - authPollStartedAt) / 1000));
+      oauthElapsed.textContent = '已等待 ' + seconds + ' 秒';
+    }
+    updateElapsed();
+    authElapsedTimer = setInterval(updateElapsed, 1000);
+  }
+
+  function restoreOAuthActions() {
+    stopOAuthWaiting();
+    if (authSubmit) { authSubmit.hidden = false; authSubmit.disabled = false; }
+    if (authCancel) authCancel.hidden = false;
   }
 
   function refreshAuthState() {
@@ -991,57 +1314,60 @@
       void chrome.runtime.lastError;
       if (resp && resp.ok) {
         renderAuth(resp.state);
-        // V2.8：PROXY 未登录且无 Claim 工作台（悬浮球引导路径）→ 自动展开登录弹层
-        if (resp.state && resp.state.mode === 'proxy' && !resp.state.loggedIn && !state.claimPayload) {
+        // V3.1 OAuth-only：未登录且无 Claim 时自动展开 OAuth 引导
+        // 修复：手动登录成功后的一段时间内不再自动弹回（等真实登录态生效）
+        if (suppressAuthAutoOpen) {
+          suppressAuthAutoOpen = false;
+        } else if (resp.state && resp.state.mode === 'proxy' && !resp.state.loggedIn && !state.claimPayload) {
           openAuthPanel();
         }
       } else renderAuth(null);
     });
   }
 
-  // V2.8：展开登录弹层（悬浮球/API 被门禁拦截时引导登录）
+  // V3.1 OAuth-only：展开 OAuth 登录引导（悬浮球/API 被门禁拦截时）
   function openAuthPanel() {
     if (!authPanel) return;
+    suppressAuthAutoOpen = false; // 手动展开视为用户主动，后续允许自动展开
     if (authHint) authHint.hidden = true;
     authPanel.hidden = false;
     authError.hidden = true;
-    authInput.value = '';
-    authInput.focus();
+    restoreOAuthActions();
   }
 
   if (authArea) {
     authLoginBtn.addEventListener('click', openAuthPanel);
-    authCancel.addEventListener('click', function () { authPanel.hidden = true; });
+    authCancel.addEventListener('click', function () {
+      stopOAuthWaiting();
+      authPanel.hidden = true;
+    });
     authLogoutBtn.addEventListener('click', function () {
+      stopOAuthWaiting();
       chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGOUT }, function () {
         void chrome.runtime.lastError;
         refreshAuthState();
       });
     });
-    function submitCode() {
-      var code = authInput.value.trim();
-      if (!code) return;
+    function startOAuthLogin() {
       authSubmit.disabled = true;
       authError.hidden = true;
-      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGIN, inviteCode: code }, function (resp) {
+      startOAuthWaiting();
+      authHint.textContent = '正在打开知乎授权页面……';
+      authHint.hidden = false;
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_LOGIN }, function (resp) {
         void chrome.runtime.lastError;
-        authSubmit.disabled = false;
         if (resp && resp.ok) {
-          authPanel.hidden = true;
-          refreshAuthState();
-          // V2.8：登录成功后自动重触发当前分析（面板刚被拦截的路径）
-          if (state.claimPayload && !state.analyzing) {
-            renderView(); // 无缓存 → startAnalysis 自动触发
-          } else if (authHint) {
-            // 悬浮球路径（无 Claim）：提示用户再点悬浮球即可开始扫描
-            authHint.textContent = '已开通 ✓ 现在回到网页点击右上角「求」悬浮球即可开始全文扫描';
-            authHint.hidden = false;
-          }
+          chrome.tabs.create({ url: resp.authorizeUrl }, function () {
+            authHint.textContent = '请在知乎页面完成授权，完成后返回此面板。';
+            authSubmit.disabled = false;
+            pollOAuthLogin(resp.flowId, true);
+          });
         } else {
+          restoreOAuthActions();
           var reason = (resp && resp.reason) || 'login_failed';
           var msgMap = {
-            invalid_invite_code: '邀请码无效，请检查后重试',
-            auth_not_configured: '登录服务未配置',
+            oauth_not_configured: 'OAuth 登录服务尚未配置',
+            oauth_start_failed: '无法启动知乎登录',
             auth_timeout: '网络超时，请重试',
             auth_network_error: '网络错误，请重试'
           };
@@ -1050,8 +1376,44 @@
         }
       });
     }
-    authSubmit.addEventListener('click', submitCode);
-    authInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitCode(); });
+    function pollOAuthLogin(flowId, first) {
+      if (authPollTimer) { clearTimeout(authPollTimer); authPollTimer = null; }
+      if (first) authPollStartedAt = Date.now();
+      if (Date.now() - authPollStartedAt >= 10 * 60 * 1000) {
+        restoreOAuthActions();
+        authError.textContent = '授权等待超时，请重新打开知乎登录。';
+        authError.hidden = false;
+        return;
+      }
+      chrome.runtime.sendMessage({ type: WCC_MSG.AUTH_OAUTH_POLL, flowId: flowId }, function (resp) {
+        void chrome.runtime.lastError;
+        if (resp && resp.ok && resp.status === 'authorized') {
+          stopOAuthWaiting();
+          suppressAuthAutoOpen = true;
+          authPanel.hidden = true;
+          authHint.hidden = true;
+          refreshAuthState();
+          if (state.claimPayload && !state.analyzing) renderView();
+          return;
+        }
+        if (resp && resp.ok && resp.status === 'pending') {
+          authHint.textContent = '请在知乎页面完成授权，完成后返回此面板。正在等待授权结果……';
+          authPollTimer = setTimeout(function () { pollOAuthLogin(flowId, false); }, 1500);
+          return;
+        }
+        restoreOAuthActions();
+        var reason = (resp && resp.reason) || 'oauth_status_failed';
+        var msgMap = {
+          flow_not_found_or_expired: '授权流程已过期，请重新打开知乎登录。',
+          oauth_session_expired: '授权会话已过期，请重新打开知乎登录。',
+          oauth_failed: '知乎授权失败，请重新打开知乎登录。',
+          oauth_status_failed: '无法获取授权状态，请重试。'
+        };
+        authError.textContent = msgMap[reason] || '知乎授权未完成，请重试。';
+        authError.hidden = false;
+      });
+    }
+    authSubmit.addEventListener('click', startOAuthLogin);
 
     refreshAuthState();
   }
@@ -1064,6 +1426,17 @@
     if (!state.analyzing || state.mode !== 'truth') return;
     if (msg.requestId !== state.reqSeq) return; // 过期请求的事件丢弃
     applyStage(msg.stage);
+  });
+
+  // V3.3 V2：求深/求异真实工作流事件；门控丢弃 requestId 不匹配 / seq 回退的事件
+  chrome.runtime.onMessage.addListener(function (msg) {
+    if (!msg || msg.type !== WCC_MSG.WORKFLOW_STAGE) return;
+    if (!state.analyzing || state.mode === 'truth') return;
+    if (msg.requestId !== state.reqSeq) return;
+    var ev = msg.event;
+    if (!ev || ev.mode !== state.mode) return;
+    if (wfGate && !wfGate.accept(ev)) return;
+    applyWorkflowEvent(ev);
   });
 
   renderView();
