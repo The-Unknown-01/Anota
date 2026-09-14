@@ -53,6 +53,7 @@
     person: '人物事件', opinion: '观点', rhetoric: '修辞'
   };
 
+  var analysisTimeoutTimer = null;
   var LOADING_STEPS = {
     truth: ['解析当前 Claim', '检索相关知识', '核对表述与证据'],
     deep: ['解析当前 Claim', '梳理相关概念', '构建知识关系'],
@@ -322,8 +323,12 @@
         ? (cached.cached ? '已核验 · 缓存' : '已核验')
         : (cached.cached ? '未联网核验 · 缓存' : '未联网核验');
     } else {
-      // 该模式尚未分析：自动触发
-      startAnalysis(state.mode);
+      // 该模式尚未分析：自动触发；失败后由 error state 接管，不在 renderView 中递归重试
+      if (!state.analyzing && state.lastError) {
+        showError(state.lastError);
+      } else {
+        startAnalysis(state.mode);
+      }
     }
   }
 
@@ -360,7 +365,9 @@
       http_401: ['鉴权失败', 'API Key 无效或已过期'],
       http_402: ['额度不足', 'DeepSeek 账户余额不足'],
       http_429: ['请求过于频繁', '请稍后再试'],
-      abort: ['请求超时', '网络较慢或服务繁忙，请重试']
+      error: ['分析超时', '知乎回答检索或正文读取时间过长，请稍后重试'],
+      analysis_timeout: ['分析超时', '知乎回答检索或正文读取时间过长，请稍后重试'],
+    no_response: ['分析未返回', '分析请求没有返回结果，请重试'],
     };
     var m = map[reason] || ['暂时无法完成深读', reason || '未知错误'];
     els.errorTitle.textContent = m[0];
@@ -376,10 +383,19 @@
   function startAnalysis(mode, force) {
     var seq = ++state.seq;
     if (force) delete state.results[mode];
+    state.lastError = null;
     state.analyzing = true;
     state.mode = mode;
     state.reqSeq = (state.reqSeq || 0) + 1; // V3.0：本请求的舞台事件序号
     var myReq = state.reqSeq;
+    if (analysisTimeoutTimer) clearTimeout(analysisTimeoutTimer);
+    analysisTimeoutTimer = setTimeout(function () {
+      if (seq !== state.seq || myReq !== state.reqSeq || !state.analyzing) return;
+      state.analyzing = false;
+      state.results[mode] = null;
+      state.lastError = 'analysis_timeout';
+      showError('analysis_timeout');
+    }, 150000);
     renderView();
     try {
       chrome.runtime.sendMessage(
@@ -387,6 +403,7 @@
         function (resp) {
           void chrome.runtime.lastError;
           if (seq !== state.seq) return; // 已有新 Claim/模式，丢弃过期响应
+          if (analysisTimeoutTimer) { clearTimeout(analysisTimeoutTimer); analysisTimeoutTimer = null; }
           state.analyzing = false;
           if (resp && resp.ok) {
             state.results[mode] = {

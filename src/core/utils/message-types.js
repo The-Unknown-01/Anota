@@ -24,6 +24,7 @@
     AUTH_STATE: 'AUTH_STATE',        // 查询 OAuth 登录态
     AUTH_LOGOUT: 'AUTH_LOGOUT',      // 退出 OAuth 应用会话
     ANALYZE_STAGE: 'ANALYZE_STAGE',  // V3.0：分析阶段直播事件（SW → panel，广播）
+    WORKFLOW_STAGE: 'WORKFLOW_STAGE', // V3.3：求深/求异真实工作流事件（start/heartbeat/candidate/done/error/timeout）
     // content script → background：悬浮球 Ready 点击，打开面板并携带本文 Claim Index（U4 概览态用）
     OPEN_PANEL_FOR_DOCUMENT: 'OPEN_PANEL_FOR_DOCUMENT',
     // 诊断

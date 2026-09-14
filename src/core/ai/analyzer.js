@@ -255,18 +255,71 @@ function extractClaimedDataTokens(text) {
 // V2.0 N5 双模式分离：本入口是「主动询问」链路（用户选中/Hover 点击），
 // 允许深入语义判断；「自动扫描」走 claim-detector（只发现+分类+定位，不验证）。
 // differ 模式额外注入真实不同立场来源（N4），禁止 AI 编造。
+function withTimeout(promise, ms, fallback) {
+  var timer;
+  return Promise.race([
+    promise,
+    new Promise(function (resolve) { timer = setTimeout(function () { resolve(fallback); }, ms); })
+  ]).then(function (value) { clearTimeout(timer); return value; }, function (err) { clearTimeout(timer); throw err; });
+}
+
 function analyze(mode, payload, opts) {
   opts = opts || {};
   var onStage = (typeof opts.onStage === 'function') ? opts.onStage : null;
+  var onWorkflow = (typeof opts.onWorkflow === 'function') ? opts.onWorkflow : null;
   if (!SYSTEM_PROMPTS[mode]) return Promise.reject(new Error('unknown_mode'));
+  // V3.3 V1：求深/求异真实工作流事件（求真继续走 V3.0 onStage）
+  var WF = global.WCC_WORKFLOW;
+  var wf = (onWorkflow && WF && (mode === 'deep' || mode === 'differ'))
+    ? WF.createEmitter(mode, opts.requestId || 0, onWorkflow)
+    : { emit: function () { return null; } };
+  var softTimeouts = Object.assign({}, WF ? WF.SOFT_TIMEOUT_MS : {}, opts.softTimeouts || {});
+  // wfPhase：start → heartbeat → (done | error | timeout→fallback)。done 由本函数在成功后统一发出。
+  function wfPhase(phase, promiseFactory, softTimeoutMs, fallback, doneDetail) {
+    wf.emit(phase, 'start', {});
+    var stopHb = (WF && WF.startHeartbeat && onWorkflow) ? WF.startHeartbeat(wf, phase) : function () {};
+    var p = Promise.resolve().then(promiseFactory);
+    if (WF && WF.withPhaseTimeout && softTimeoutMs) p = WF.withPhaseTimeout(wf, phase, p, softTimeoutMs, fallback);
+    return p.then(function (v) {
+      stopHb();
+      if (doneDetail !== false) wf.emit(phase, 'done', typeof doneDetail === 'function' ? doneDetail(v) : (doneDetail || {}));
+      return v;
+    }, function (e) { stopHb(); wf.emit(phase, 'error', { error: String(e && e.message || e) }); throw e; });
+  }
   var key = cacheKey(mode, String(payload.selectedText || ''), payload.url);
   return cacheGet(key).then(function (hit) {
     if (hit) return { mode: mode, result: hit.result, cached: true, sources: hit.sources, verified: hit.verified };
+    wf.emit('understand', 'start', {});
+    wf.emit('understand', 'done', { textLength: String(payload.selectedText || '').length });
     // differ 模式：先挖真实对立观点，作为 differSources 注入 prompt（§10）
     var differPrep = (mode === 'differ' && WCC_SEARCH_CONTROLLER && WCC_SEARCH_CONTROLLER.searchForClaim)
-      ? WCC_SEARCH_CONTROLLER.searchForClaim({ text: payload.selectedText, sourceRequirement: 'any' })
-          .then(function (sr) { return sr.candidates.length ? WCC_VERIFY_ENGINE.discoverDifferViewpoints({ text: payload.selectedText }, sr.candidates) : { found: false, viewpoints: [] }; })
+      ? wfPhase('zhihu_search', function () {
+          wf.emit('query', 'start', {});
+          wf.emit('query', 'done', { query: String(payload.selectedText || '').slice(0, 80) });
+          return WCC_SEARCH_CONTROLLER.searchForClaim({ text: payload.selectedText, sourceRequirement: 'any' }, { zhihuAnswersOnly: true });
+        }, softTimeouts.zhihu_search || 15000, { candidates: [], reason: 'timeout' }, function (sr) {
+          var cands = (sr && sr.candidates) || [];
+          cands.forEach(function (c, i) { wf.emit('zhihu_search', 'candidate', { completed: i + 1, total: cands.length, answer: { title: c.title || '', url: c.url || '', snippet: String(c.snippet || '').slice(0, 160) } }); });
+          return { count: cands.length, sourcePolicy: (sr && sr.sourcePolicy) || 'zhihu_answers_only' };
+        })
+          .then(function (sr) {
+            var cands = (sr && sr.candidates) || [];
+            wf.emit('filter', 'start', {});
+            var top = cands.slice(0, 3);
+            wf.emit('filter', 'done', { kept: top.length, dropped: Math.max(0, cands.length - top.length) });
+            if (!top.length) return { found: false, viewpoints: [] };
+            wf.emit('answer_read', 'start', { total: top.length });
+            return wfPhase('stance_judge', function () {
+              return WCC_VERIFY_ENGINE.discoverDifferViewpoints({ text: payload.selectedText }, top);
+            }, softTimeouts.stance_judge || 30000, { found: false, viewpoints: [], detail: '知乎回答正文读取或观点分析超时' }, function (d) {
+              wf.emit('answer_read', 'done', { total: top.length });
+              (d.viewpoints || []).forEach(function (v, i) { wf.emit('stance_judge', 'candidate', { completed: i + 1, total: d.viewpoints.length, stance: 'different', answer: { title: v.title || '', url: v.url || '', quote: String(v.quote || '').slice(0, 200) } }); });
+              return { found: !!d.found, count: (d.viewpoints || []).length, detail: d.detail || null };
+            });
+          })
           .then(function (d) {
+            wf.emit('bind', 'start', {});
+            wf.emit('bind', 'done', { bound: (d.viewpoints || []).length });
             if (!d.viewpoints.length) return '';
             var lines = ['【系统检索到的真实不同观点（必须优先基于这些作答，禁止编造）】'];
             d.viewpoints.forEach(function (v, i) {
@@ -308,7 +361,26 @@ function analyze(mode, payload, opts) {
         }).catch(function () { return { v25: null, sources: null, extra: '' }; })
       : Promise.all([
         (WCC_DATASOURCE && WCC_DATASOURCE.isAvailable() && query.length >= 4)
-          ? WCC_DATASOURCE.searchBoth(query).catch(function () { return null; })
+          ? (mode === 'deep' && WCC_DATASOURCE.searchZhihuAnswers
+            ? wfPhase('zhihu_search', function () {
+                wf.emit('query', 'start', {});
+                wf.emit('query', 'done', { query: query.slice(0, 80) });
+                return WCC_DATASOURCE.searchZhihuAnswers(query, 8);
+              }, softTimeouts.zhihu_search || 15000, [], function (items) {
+                items = items || [];
+                items.forEach(function (c, i) { wf.emit('zhihu_search', 'candidate', { completed: i + 1, total: items.length, answer: { title: c.title || '', url: c.url || '', snippet: String(c.snippet || '').slice(0, 160) } }); });
+                return { count: items.length, sourcePolicy: 'zhihu_answers_only' };
+              })
+              .then(function (items) {
+                items = items || [];
+                // 求深 MVP：正文读取/引用提取阶段暂以摘要为材料，状态如实标注为"摘要级"
+                wf.emit('answer_read', 'start', { total: items.length });
+                wf.emit('answer_read', 'done', { total: items.length, level: 'snippet' });
+                wf.emit('quote_extract', 'start', {});
+                wf.emit('quote_extract', 'done', { quotable: 0, note: '摘要级材料，正文引用待 V3.2 Z2 接入' });
+                return { zhihu: items, global: [] };
+              }).catch(function () { return null; })
+            : WCC_DATASOURCE.searchBoth(query).catch(function () { return null; }))
           : Promise.resolve(null),
         differPrep
       ]).then(function (r) { return { sources: r[0], extra: r[1] }; });
@@ -318,13 +390,20 @@ function analyze(mode, payload, opts) {
       var v25 = r.v25 || null;
       var contextText = [formatSourcesForPrompt(sources), extra,
         v25 && v25.candidates ? formatV25EvidenceForPrompt(v25) : ''].filter(Boolean).join('\n\n');
-      return callDeepseek(mode, payload, contextText).catch(function (err) {
-        if (String(err.message).indexOf('missing_fields') === 0 ||
-            err.message === 'unbalanced_json' || err.message === 'no_json_in_response') {
-          return callDeepseek(mode, payload, contextText);
-        }
-        throw err;
-      }).then(function (parsed) {
+      var synth = function () {
+        return callDeepseek(mode, payload, contextText).catch(function (err) {
+          if (String(err.message).indexOf('missing_fields') === 0 ||
+              err.message === 'unbalanced_json' || err.message === 'no_json_in_response') {
+            wf.emit('synthesis', 'progress', { retry: true, reason: err.message });
+            return callDeepseek(mode, payload, contextText);
+          }
+          throw err;
+        });
+      };
+      var synthP = (mode === 'deep' || mode === 'differ')
+        ? wfPhase('synthesis', synth, 0, null)
+        : synth();
+      return synthP.then(function (parsed) {
         // search_advise §20/§22：Evidence-Grounded 硬校验——
         // 检索没有可用来源（v25 候选为空 且 知乎来源为空）时，
         // 禁止 LLM 凭训练知识输出"已核实"结论：supported/partial 一律降级 insufficient。
@@ -360,6 +439,10 @@ function analyze(mode, payload, opts) {
         var verifiedSources = hasRetrievedEvidence;
         var entry = { result: parsed, at: Date.now(), sources: sources, verified: verifiedSources, verification: v25 };
         cacheSet(key, entry);
+        if (mode === 'deep') {
+          wf.emit('bind', 'start', {});
+          wf.emit('bind', 'done', { answers: (sources && sources.zhihu && sources.zhihu.length) || 0 });
+        }
         return { mode: mode, result: parsed, cached: false, sources: sources, verified: verifiedSources, verification: v25 };
       });
     });
