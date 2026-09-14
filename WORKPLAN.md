@@ -1137,6 +1137,18 @@ MVP 优先采用**结构化阶段事件 + 增量候选卡片**，而不是直接
 - `background.js` importScripts 加载 workflow-events；ANALYZE 处理器新增 `workflowBroadcast` 广播 `WORKFLOW_STAGE`（带 requestId）；truth 仍只走 V3.0 `onStage`。
 - 验证：`V33-V1 VERIFY 15/15`（含超时/心跳/truth 无事件/无回调静默）；`V33-V0` 回归 14/14；`smoke` 45/45；`node --check` 通过。
 
+### V2+V3 执行记录 ✅（2026-09-14）
+
+- `panel.js` 求深/求异 loading 改为 `buildWorkflowTheater(mode)`：阶段行由 `WCC_WORKFLOW.PHASES[mode]` 生成（呼吸光点 + 名称 + 实时耗时 `.stage-time` + 细节 `.stage-sub`），**删除了 1.4s/3.6s 的 setTimeout 假推进**；状态只由 `WORKFLOW_STAGE` 事件驱动（start/candidate/progress/done/error/timeout）。
+- 事件门控：新增 `WORKFLOW_STAGE` 监听，按 `requestId===state.reqSeq`、`ev.mode===state.mode`、`createGate` seq 单调三重过滤；truth 仍走 V3.0 `ANALYZE_STAGE`。
+- 1s ticker：当前阶段耗时与标题总耗时实时刷新；同一阶段 >5s 无事件时细节行显示「仍在等待响应（已 Ns）」（红线：5s 无静默）。最终响应/硬超时均 `stopWorkflowTheater()` 清理。
+- 知乎回答增量卡片：`zhihu_search:candidate` 到达即 `appendAnswerCard`（按 url 去重、点击打开原回答、标注"摘要"）；`stance_judge:candidate` 点亮同一卡片为「不同立场 · 有原文」（title 显示原文片段）；候选区标题改为「知乎回答材料（逐条到达）」。
+- 状态文案如实：search done「共 N 条知乎回答（仅知乎回答来源）」；answer_read「摘要级材料」；quote_extract「暂无可直接引用原文」；stance done 无结果时「未找到可靠的不同观点（不伪造）」；timeout 独立黄色状态「超时（已降级继续）」。
+- CSS：阶段间纵向连接线（done 段变绿）、`.stage-time` tabular-nums、`.timeout` 状态色、进行中名称呼吸（opacity only）、回答卡蓝/立场卡橙；`prefers-reduced-motion` 关闭全部动画。
+- 修复：切换 Tab 时清 `lastError`，避免上一模式的错误阻止新模式自动分析。
+- `index.html` 引入 `workflow-events.js`。
+- 验证：`V33-V2V3 VERIFY 21/21`（jsdom 加载真实 index.html+panel.js：点击求异 Tab → 真实 emitter 事件驱动 → 卡片增量/去重/点亮、timeout 态、stale seq/异 requestId 拒绝、5s 静默提示、最终响应停 ticker）；V0 14/14、V1 15/15、Z1 11/11、OAuth UI 14/14、smoke 45/45 回归通过。
+
 
 # 已知环境问题
 - 知乎平台 30001 频率限制窗口（无 Retry-After）：串行+缓存已缓解。

@@ -230,6 +230,41 @@ li.cand.lit .cand-type { background: rgba(46,158,91,.16); color: var(--ok, #2e9e
 .cand-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cand-meta { flex: 0 0 auto; font-size: 10px; color: var(--ink-3); }
 
+/* ---- V3.3 求深/求异工作流剧场（真实事件驱动） ---- */
+.loading-steps li.stage.wf { position: relative; }
+/* 纵向连接线：把阶段串成 workflow，已完成段变绿 */
+.loading-steps li.stage.wf::after {
+  content: ""; position: absolute; left: 4px; top: 22px; bottom: -8px; width: 1px;
+  background: rgba(127,127,160,.18); transition: background .4s;
+}
+.loading-steps li.stage.wf:last-child::after { display: none; }
+.loading-steps li.stage.wf.done::after { background: rgba(46,158,91,.45); }
+.stage-time {
+  flex: 0 0 auto; margin-left: auto; font-size: 10.5px; font-variant-numeric: tabular-nums;
+  color: var(--ink-3); opacity: 0; transition: opacity .3s;
+}
+.loading-steps li.stage.doing .stage-time,
+.loading-steps li.stage.done .stage-time,
+.loading-steps li.stage.timeout .stage-time { opacity: 1; }
+.loading-steps li.stage.doing .stage-time { color: var(--accent); }
+.loading-steps li.stage.timeout .stage-dot { background: #d9962b; box-shadow: 0 0 6px rgba(217,150,43,.45); }
+.loading-steps li.stage.timeout .stage-sub { max-height: 4.6em; opacity: 1; color: #b7791f; }
+/* 进行中的阶段：名称呼吸微光（transform/opacity 仅） */
+.loading-steps li.stage.wf.doing .stage-name { animation: wf-breath 1.6s ease-in-out infinite; }
+@keyframes wf-breath { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
+/* 知乎回答卡片：发现=灰，绑定立场=点亮橙 */
+li.cand.ans .cand-type { background: rgba(23,114,246,.12); color: #1772f6; }
+li.cand.ans.stance .cand-type { background: rgba(217,150,43,.16); color: #b7791f; }
+li.cand.ans.stance .cand-meta { color: #b7791f; font-weight: 600; }
+li.cand.ans:hover .cand-title { text-decoration: underline; }
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-steps li.stage.doing .stage-dot,
+  .loading-steps li.stage.wf.doing .stage-name,
+  .candidate-list li.cand { animation: none; opacity: 1; transform: none; }
+  .stage-sub, .stage-dot, .stage-time { transition: none; }
+}
+
 .error-icon { font-size: 26px; color: var(--bad); }
 .error-title { font-weight: 700; margin: 6px 0 2px; }
 .error-detail { font-size: 12.5px; color: var(--ink-2); margin-bottom: 12px; }

@@ -340,22 +340,148 @@
       show(els.loading);
       return;
     }
-    // deep/differ：轻量步骤提示（V3.0 M2 再接入事件直播）
+    // V3.3 V2：deep/differ 真实工作流时间线（由 WORKFLOW_STAGE 事件驱动；不再 setTimeout 假推进）
     els.loadingTitle.textContent = MODE_NAMES[state.mode] + '分析中……';
-    els.loadingSteps.innerHTML = '';
-    LOADING_STEPS[state.mode].forEach(function (s, i) {
-      var li = document.createElement('li');
-      // 复用求真剧场同款 icon 体系：呼吸闪光点(.stage-dot) + 旋转半球(◐) + 完成勾(✓)
-      li.className = 'stage ' + (i === 0 ? 'doing' : 'todo');
-      li.appendChild(el('span', 'stage-dot'));
-      li.appendChild(el('span', 'stage-name', s));
-      els.loadingSteps.appendChild(li);
-    });
-    // 分步推进的视觉节奏（真实进度不可知，但状态可感知）
-    var stepEls = [].slice.call(els.loadingSteps.children);
-    setTimeout(function () { stepEls[0] && stepEls[0].classList.replace('doing', 'done'); stepEls[1] && stepEls[1].classList.replace('todo', 'doing'); }, 1400);
-    setTimeout(function () { stepEls[1] && stepEls[1].classList.replace('doing', 'done'); stepEls[2] && stepEls[2].classList.replace('todo', 'doing'); }, 3600);
+    buildWorkflowTheater(state.mode);
     show(els.loading);
+  }
+
+  // ---------- V3.3 V2/V3：求深/求异工作流剧场 ----------
+  var wfTheater = {};       // phase -> { row, sub, time }
+  var wfGate = null;        // WCC_WORKFLOW.createGate(requestId)
+  var wfTicker = null;      // 1s 心跳/耗时刷新
+  var wfLast = { phase: null, at: 0, startedAt: 0 };
+  var wfAnswerSeen = {};    // url -> li（知乎回答增量卡片去重）
+  var wfAnswerCount = 0;
+
+  var WF_STATUS_ZH = { start: '进行中', heartbeat: '进行中', candidate: '进行中', progress: '进行中', done: '完成', error: '失败', timeout: '超时（已降级继续）', cancelled: '已取消' };
+
+  function fmtSec(ms) { return (Math.max(0, ms) / 1000).toFixed(ms < 10000 ? 1 : 0) + 's'; }
+
+  function buildWorkflowTheater(mode) {
+    if (!els.loadingSteps) return;
+    els.loadingSteps.innerHTML = '';
+    wfTheater = {}; wfAnswerSeen = {}; wfAnswerCount = 0;
+    resetPreview();
+    if (candidateList && candidateList.previousElementSibling) candidateList.previousElementSibling.textContent = '知乎回答材料（逐条到达）';
+    var WF = window.WCC_WORKFLOW;
+    wfGate = WF ? WF.createGate(state.reqSeq) : null;
+    wfLast = { phase: null, at: Date.now(), startedAt: Date.now() };
+    var phases = (WF && WF.PHASES[mode]) || [];
+    phases.forEach(function (p, i) {
+      var li = document.createElement('li');
+      li.className = 'stage wf' + (i === 0 ? ' doing' : '');
+      li.dataset.phase = p.id;
+      var dot = el('span', 'stage-dot');
+      var name = el('span', 'stage-name', p.label);
+      var time = el('span', 'stage-time', '');
+      var sub = el('span', 'stage-sub', p.hint);
+      li.appendChild(dot); li.appendChild(name); li.appendChild(time); li.appendChild(sub);
+      els.loadingSteps.appendChild(li);
+      wfTheater[p.id] = { row: li, sub: sub, time: time, hint: p.hint, startedAt: i === 0 ? Date.now() : 0 };
+    });
+    if (wfTicker) clearInterval(wfTicker);
+    wfTicker = setInterval(tickWorkflow, 1000);
+  }
+
+  function stopWorkflowTheater() {
+    if (wfTicker) { clearInterval(wfTicker); wfTicker = null; }
+    wfGate = null;
+  }
+
+  // 每秒刷新：当前阶段耗时；>5s 无事件时显示"仍在等待"提示（红线：不允许 5s 静默）
+  function tickWorkflow() {
+    if (!state.analyzing || state.mode === 'truth') { stopWorkflowTheater(); return; }
+    var now = Date.now();
+    Object.keys(wfTheater).forEach(function (id) {
+      var t = wfTheater[id];
+      if (t.row.classList.contains('doing') && t.startedAt) t.time.textContent = fmtSec(now - t.startedAt);
+    });
+    var cur = wfLast.phase && wfTheater[wfLast.phase];
+    if (cur && cur.row.classList.contains('doing') && now - wfLast.at > 5000) {
+      cur.sub.textContent = cur.hint + ' · 仍在等待响应（已 ' + fmtSec(now - cur.startedAt) + '）';
+    }
+    var total = els.loadingTitle;
+    if (total) total.textContent = MODE_NAMES[state.mode] + '分析中…… ' + fmtSec(now - wfLast.startedAt);
+  }
+
+  function wfSubText(ev) {
+    var d = ev.detail || {};
+    switch (ev.phase) {
+      case 'understand': return ev.status === 'done' ? '已理解目标 · ' + (d.textLength || 0) + ' 字' : null;
+      case 'query': return d.query ? '检索词：' + d.query : null;
+      case 'zhihu_search':
+        if (ev.status === 'candidate') return '已找到 ' + (ev.completed || 0) + (ev.total ? '/' + ev.total : '') + ' 条知乎回答';
+        if (ev.status === 'done') return '共 ' + (d.count || 0) + ' 条知乎回答（仅知乎回答来源）';
+        if (ev.status === 'timeout') return '搜索超时，保留已发现回答继续';
+        return null;
+      case 'filter': return ev.status === 'done' ? '保留 ' + (d.kept || 0) + ' 条' + (d.dropped ? '，略过 ' + d.dropped + ' 条' : '') : null;
+      case 'answer_read':
+        if (ev.status === 'done') return (d.level === 'snippet' ? '摘要级材料 · ' : '已读取 ') + (d.total || 0) + ' 条';
+        if (ev.status === 'start') return '读取 ' + (d.total || 0) + ' 条回答正文……';
+        return null;
+      case 'quote_extract': return ev.status === 'done' ? (d.quotable ? '可引用片段 ' + d.quotable + ' 条' : '当前为摘要级材料，暂无可直接引用原文') : null;
+      case 'stance_judge':
+        if (ev.status === 'candidate') return '已确认 ' + (ev.completed || 0) + '/' + (ev.total || 0) + ' 个不同立场';
+        if (ev.status === 'done') return d.count ? '找到 ' + d.count + ' 个有出处的不同立场' : '未找到可靠的不同观点（不伪造）';
+        if (ev.status === 'timeout') return '立场判断超时，仅保留已确认项';
+        return null;
+      case 'bind': return ev.status === 'done' ? '已绑定 ' + (d.bound != null ? d.bound : (d.answers != null ? d.answers : 0)) + ' 条知乎回答出处' : null;
+      case 'synthesis':
+        if (ev.status === 'progress' && d.retry) return '模型输出格式修正中（重试一次）';
+        if (ev.status === 'done') return '模型生成完成';
+        return '等待模型生成……';
+      default: return null;
+    }
+  }
+
+  function applyWorkflowEvent(ev) {
+    var t = wfTheater[ev.phase];
+    if (!t) return;
+    var now = Date.now();
+    wfLast.phase = ev.phase; wfLast.at = now;
+    if (ev.status === 'heartbeat') { if (!t.startedAt) t.startedAt = now; return; }
+    if (ev.status === 'start') {
+      t.startedAt = now;
+      t.row.classList.remove('done', 'error', 'timeout'); t.row.classList.add('doing');
+      t.sub.textContent = t.hint;
+      return;
+    }
+    if (ev.status === 'candidate' || ev.status === 'progress') {
+      t.row.classList.add('doing');
+      var s = wfSubText(ev); if (s) t.sub.textContent = s;
+      if (ev.detail && ev.detail.answer) appendAnswerCard(ev.detail.answer, ev.phase === 'stance_judge' ? 'stance' : 'found');
+      return;
+    }
+    t.row.classList.remove('doing');
+    t.row.classList.add(ev.status === 'done' ? 'done' : ev.status === 'timeout' ? 'timeout' : 'error');
+    t.time.textContent = fmtSec(t.startedAt ? now - t.startedAt : ev.phaseElapsedMs || 0);
+    t.sub.textContent = wfSubText(ev) || (ev.status === 'done' ? '完成' : ev.status === 'timeout' ? '超时（已降级继续）' : ('此步未成功' + (ev.detail && ev.detail.error ? '：' + ev.detail.error : '')));
+  }
+
+  // V3.3 V3：知乎回答增量卡片（found=发现/摘要级；stance=已绑定不同立场）
+  function appendAnswerCard(ans, kind) {
+    if (!candidateList || !ans || !(ans.url || ans.title)) return;
+    if (previewBox) previewBox.hidden = false;
+    var key = ans.url || ans.title;
+    var li = wfAnswerSeen[key];
+    if (!li) {
+      li = document.createElement('li');
+      li.className = 'cand ans dim';
+      var type = el('span', 'cand-type', '知乎回答');
+      var title = el('span', 'cand-title', ans.title || ans.url);
+      title.title = ans.url || '';
+      var meta = el('span', 'cand-meta', '摘要');
+      li.appendChild(type); li.appendChild(title); li.appendChild(meta);
+      if (ans.url) { li.style.cursor = 'pointer'; li.addEventListener('click', function () { chrome.tabs.create({ url: ans.url }); }); }
+      candidateList.appendChild(li);
+      wfAnswerSeen[key] = li; wfAnswerCount++;
+    }
+    if (kind === 'stance') {
+      li.classList.remove('dim'); li.classList.add('lit', 'stance');
+      li.querySelector('.cand-meta').textContent = '不同立场 · 有原文';
+      if (ans.quote) li.title = '原文：' + ans.quote;
+    }
   }
 
   function showError(reason) {
@@ -394,6 +520,7 @@
       state.analyzing = false;
       state.results[mode] = null;
       state.lastError = 'analysis_timeout';
+      stopWorkflowTheater();
       showError('analysis_timeout');
     }, 150000);
     renderView();
@@ -404,6 +531,7 @@
           void chrome.runtime.lastError;
           if (seq !== state.seq) return; // 已有新 Claim/模式，丢弃过期响应
           if (analysisTimeoutTimer) { clearTimeout(analysisTimeoutTimer); analysisTimeoutTimer = null; }
+          stopWorkflowTheater();
           state.analyzing = false;
           if (resp && resp.ok) {
             state.results[mode] = {
@@ -1040,6 +1168,7 @@
   els.tabs.addEventListener('click', function (e) {
     var tab = e.target.closest('.tab');
     if (!tab) return;
+    if (tab.dataset.mode !== state.mode) state.lastError = null; // 切换模式：上一模式的错误不阻止新模式自动分析
     state.mode = tab.dataset.mode;
     [].forEach.call(els.tabs.querySelectorAll('.tab'), function (t) {
       var active = t === tab;
@@ -1297,6 +1426,17 @@
     if (!state.analyzing || state.mode !== 'truth') return;
     if (msg.requestId !== state.reqSeq) return; // 过期请求的事件丢弃
     applyStage(msg.stage);
+  });
+
+  // V3.3 V2：求深/求异真实工作流事件；门控丢弃 requestId 不匹配 / seq 回退的事件
+  chrome.runtime.onMessage.addListener(function (msg) {
+    if (!msg || msg.type !== WCC_MSG.WORKFLOW_STAGE) return;
+    if (!state.analyzing || state.mode === 'truth') return;
+    if (msg.requestId !== state.reqSeq) return;
+    var ev = msg.event;
+    if (!ev || ev.mode !== state.mode) return;
+    if (wfGate && !wfGate.accept(ev)) return;
+    applyWorkflowEvent(ev);
   });
 
   renderView();
