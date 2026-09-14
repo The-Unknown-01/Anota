@@ -69,9 +69,20 @@
 
   function decodeJwt(jwt) {
     try {
-      var part = String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-      while (part.length % 4) part += '=';
-      return JSON.parse(atob(part));
+      var encoded = String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (encoded.length % 4) encoded += '=';
+      var binary = atob(encoded);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      var text;
+      if (typeof TextDecoder !== 'undefined') {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } else {
+        text = decodeURIComponent(Array.prototype.map.call(bytes, function (b) {
+          return '%' + ('0' + b.toString(16)).slice(-2);
+        }).join(''));
+      }
+      return JSON.parse(text);
     } catch (e) { return null; }
   }
 

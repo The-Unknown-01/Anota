@@ -791,6 +791,14 @@ Worker 校验会话 → 代理 DeepSeek / Exa / Metaso / 知乎通用搜索
 - 根因 2：`.auth-panel { display:flex }` 覆盖浏览器 `[hidden]` 默认行为；现增加 `.auth-panel[hidden] { display:none !important }` 等显式规则。authorized 分支先停止轮询/读秒，再隐藏登录窗口并刷新登录态。
 - 验证：`V31-PROFILE-CLOSE VERIFY 14/14`；`node --check` 通过；旧 OAuth polling 与 smoke 回归保持通过。
 
+### A4-UI-3 执行记录 ✅（2026-09-14）
+
+- 发现并修复中文用户名解析问题：JWT payload 原先用 `JSON.parse(atob(...))`，中文 UTF-8 会解析失败，导致应用 JWT 不落库、登录成功 UI 不收口；现用 `Uint8Array + TextDecoder('utf-8')`，无 TextDecoder 时使用 URI fallback。
+- Worker `/user` 资料链路保留在服务端：真实 `displayName` 写入应用 JWT `display_name`；扩展只保存应用 JWT，不保存 OAuth Token。
+- `renderAuth()` 优先显示 `displayName`；资料不可用时显示「已授权知乎账号」，不再用随机 `zhihu-...` 作为用户名。
+- 修复 `.auth-panel { display:flex }` 覆盖 `hidden` 的问题：增加 `.auth-panel[hidden] { display:none !important }`；成功分支先停 timer，再隐藏登录窗口。
+- 验证：`V31-PROFILE-CLOSE-UTF8 VERIFY 17/17`；`node --check` 通过；`smoke-search-advise.js` 45/45。
+
 # 已知环境问题
 
 - **Chrome 151 + --load-extension 的 content script 注入失效**（自动化测试环境）：开发者模式扩展的 content script 不再注入（含最小 hello-world 复现；site access"所有网站"后仅首次导航偶发注入）。注入链模拟证明 5 个 content script 无运行时错误。**影响**：E2E 自动化暂不可用。**缓解**：人工加载扩展正常使用，或降级 Chrome for Testing 跑 E2E。
